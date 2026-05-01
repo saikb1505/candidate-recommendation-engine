@@ -1,0 +1,7 @@
+pydantic
+python-magic
+pdf2image
+Pillow
+anthropic
+sentence_transformers
+chromadb
