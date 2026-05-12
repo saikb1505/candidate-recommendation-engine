@@ -26,10 +26,10 @@ WHY process_single + process_batch + process_batch_concurrent?
     5x faster but uses more resources.
 """
 
+import asyncio
 import json
 import time
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from config.settings import config
 from config.schema import ResumeSchema
@@ -50,7 +50,7 @@ from extraction.validator import validate_resume
 #  SINGLE RESUME PROCESSING
 # ──────────────────────────────────────────────
 
-def process_single(file_path: str, file_type: str) -> tuple[ResumeSchema | None, str]:
+async def process_single(file_path: str, file_type: str) -> tuple[ResumeSchema | None, str]:
     """
     Process one resume: convert → extract → validate.
 
@@ -67,7 +67,7 @@ def process_single(file_path: str, file_type: str) -> tuple[ResumeSchema | None,
         @app.post("/extract")
         async def extract(file: UploadFile):
             # save file, detect type...
-            resume, error = process_single(path, file_type)
+            resume, error = await process_single(path, file_type)
             if error:
                 raise HTTPException(400, error)
             return resume
@@ -75,7 +75,7 @@ def process_single(file_path: str, file_type: str) -> tuple[ResumeSchema | None,
     filename = Path(file_path).name
 
     # Step 1: Extract JSON via LLM (conversion happens lazily inside on fallback)
-    raw_data = extract_resume_with_retry(file_path, file_type)
+    raw_data = await extract_resume_with_retry(file_path, file_type)
 
     # Step 2: Validate and clean
     resume, error = validate_resume(raw_data, source_file=filename)
@@ -142,7 +142,7 @@ def _get_records(
 #  SEQUENTIAL BATCH PROCESSING
 # ──────────────────────────────────────────────
 
-def process_batch(
+async def process_batch(
     resume_dir: Path | None = None,
     resume_from_manifest: bool = False,
 ) -> dict:
@@ -175,7 +175,7 @@ def process_batch(
         filename = Path(record.path).name
         print(f"  [{i+1}/{len(pending)}] Processing: {filename}")
 
-        resume, error = process_single(record.path, record.file_type)
+        resume, error = await process_single(record.path, record.file_type)
 
         if error:
             record.status = ProcessingStatus.FAILED
@@ -201,30 +201,19 @@ def process_batch(
 #  CONCURRENT BATCH PROCESSING
 # ──────────────────────────────────────────────
 
-def process_batch_concurrent(
+async def process_batch_concurrent(
     resume_dir: Path | None = None,
     resume_from_manifest: bool = False,
     max_workers: int = 5,
 ) -> dict:
     """
-    Process resumes with concurrent API calls.
+    Process resumes with concurrent async API calls.
 
     Args:
-        max_workers: number of parallel API calls.
-            5 is safe for most Anthropic API rate limits.
+        max_workers: max concurrent API calls in flight at once.
+            5 is safe for most API rate limits.
             Increase to 10 if you have higher tier access.
             Decrease to 3 if you see 429 rate limit errors.
-
-    WHY ThreadPoolExecutor instead of asyncio?
-    The Anthropic SDK's client.messages.create() is synchronous.
-    ThreadPoolExecutor runs multiple synchronous calls in parallel.
-    For I/O-bound tasks (waiting for API responses), threads
-    work just as well as async and are simpler to understand.
-
-    WHY limit to 5 workers?
-    Anthropic rate-limits API calls per minute. Sending 50
-    concurrent requests would get 429 errors. 5 workers keeps
-    you safely under the limit while still being ~5x faster.
     """
     config.ensure_dirs()
 
@@ -247,55 +236,49 @@ def process_batch_concurrent(
         print("  Nothing to process!")
         return results
 
-    print(f"  Processing {len(pending)} files with {max_workers} workers...")
+    print(f"  Processing {len(pending)} files with {max_workers} concurrent workers...")
 
     start_time = time.time()
-    completed = 0
+    semaphore = asyncio.Semaphore(max_workers)
 
-    def _process_one(record: FileRecord) -> dict:
-        """Process a single resume in a thread."""
-        filename = Path(record.path).name
-        resume, error = process_single(record.path, record.file_type)
+    async def _process_one(record: FileRecord) -> dict:
+        async with semaphore:
+            filename = Path(record.path).name
+            resume, error = await process_single(record.path, record.file_type)
 
-        if error:
-            record.status = ProcessingStatus.FAILED
-            record.error_message = error
-            return {"file": filename, "success": False, "error": error}
-        else:
-            _save_json(resume, filename)
-            record.status = ProcessingStatus.JSON_EXTRACTED
-            return {
-                "file": filename,
-                "success": True,
-                "name": resume.contact.name or "name not found",
-            }
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_record = {
-            executor.submit(_process_one, record): record
-            for record in pending
-        }
-
-        # Collect results as they complete
-        for future in as_completed(future_to_record):
-            completed += 1
-            result = future.result()
-            filename = result["file"]
-
-            if result["success"]:
-                results["succeeded"] += 1
-                print(f"  [{completed}/{len(pending)}] OK: {filename}"
-                      f" → {result['name']}")
+            if error:
+                record.status = ProcessingStatus.FAILED
+                record.error_message = error
+                return {"file": filename, "success": False, "error": error}
             else:
-                results["failed"] += 1
-                results["errors"].append(result)
-                print(f"  [{completed}/{len(pending)}] FAILED: {filename}"
-                      f" → {result['error'][:80]}")
+                _save_json(resume, filename)
+                record.status = ProcessingStatus.JSON_EXTRACTED
+                return {
+                    "file": filename,
+                    "success": True,
+                    "name": resume.contact.name or "name not found",
+                }
 
-        # Save manifest once at the end
-        # (not per-file like sequential, because threads would conflict)
-        save_manifest(all_records)
+    task_results = await asyncio.gather(
+        *[_process_one(record) for record in pending],
+        return_exceptions=True,
+    )
+
+    for i, result in enumerate(task_results):
+        if isinstance(result, Exception):
+            filename = Path(pending[i].path).name
+            results["failed"] += 1
+            results["errors"].append({"file": filename, "error": str(result)})
+            print(f"  [{i+1}/{len(pending)}] FAILED: {filename} → {result}")
+        elif result["success"]:
+            results["succeeded"] += 1
+            print(f"  [{i+1}/{len(pending)}] OK: {result['file']} → {result['name']}")
+        else:
+            results["failed"] += 1
+            results["errors"].append(result)
+            print(f"  [{i+1}/{len(pending)}] FAILED: {result['file']} → {result['error'][:80]}")
+
+    save_manifest(all_records)
 
     results["duration_seconds"] = round(time.time() - start_time, 2)
     _print_summary(results)

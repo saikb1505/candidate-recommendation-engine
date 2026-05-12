@@ -34,10 +34,11 @@ TWO MODES:
     POST /match (with JD body)  → smart_match
 """
 
+import asyncio
 import json
 from dataclasses import dataclass
 
-from anthropic import Anthropic
+from anthropic import AsyncAnthropic
 
 from config.settings import config
 from embeddings.vector_store import search, search_with_skills
@@ -84,7 +85,7 @@ class CandidateMatch:
 #  FAST MATCH (vector search only, free)
 # ──────────────────────────────────────────────
 
-def fast_match(
+async def fast_match(
     query: str,
     required_skills: list[str] | None = None,
     min_years: float | None = None,
@@ -109,7 +110,8 @@ def fast_match(
     Returns:
         List of CandidateMatch objects, ranked by similarity.
     """
-    results = search_with_skills(
+    results = await asyncio.to_thread(
+        search_with_skills,
         query_text=query,
         required_skills=required_skills,
         min_years=min_years,
@@ -124,7 +126,7 @@ def fast_match(
 #  SMART MATCH (vector search + LLM re-ranking)
 # ──────────────────────────────────────────────
 
-def smart_match(
+async def smart_match(
     job_description: str,
     top_k: int = 10,
 ) -> list[CandidateMatch]:
@@ -151,7 +153,7 @@ def smart_match(
     """
     # Step 1: Parse the JD to extract requirements
     print("  Parsing job description...")
-    requirements = _parse_job_description(job_description)
+    requirements = await _parse_job_description(job_description)
 
     print(f"    Skills: {requirements.get('skills', [])}")
     print(f"    Min years: {requirements.get('min_years', 'any')}")
@@ -161,7 +163,8 @@ def smart_match(
     print("  Searching candidates...")
     fetch_k = min(top_k * 3, 30)  # fetch more for re-ranking
 
-    results = search_with_skills(
+    results = await asyncio.to_thread(
+        search_with_skills,
         query_text=job_description,
         required_skills=requirements.get("skills"),
         min_years=requirements.get("min_years"),
@@ -172,7 +175,7 @@ def smart_match(
     if not results:
         # Retry without filters if no results found
         print("  No filtered results, trying without filters...")
-        results = search(job_description, top_k=fetch_k)
+        results = await asyncio.to_thread(search, job_description, fetch_k)
 
     if not results:
         print("  No candidates found")
@@ -181,7 +184,7 @@ def smart_match(
     # Step 3: Re-rank with LLM
     print(f"  Re-ranking top {len(results)} candidates with LLM...")
     candidates = _format_results(results)
-    ranked = _rerank_with_llm(job_description, candidates, top_k)
+    ranked = await _rerank_with_llm(job_description, candidates, top_k)
 
     return ranked
 
@@ -211,7 +214,7 @@ RULES:
 Return ONLY the JSON. No markdown, no explanation."""
 
 
-def _parse_job_description(jd_text: str) -> dict:
+async def _parse_job_description(jd_text: str) -> dict:
     """
     Extract structured requirements from a job description.
 
@@ -230,10 +233,10 @@ def _parse_job_description(jd_text: str) -> dict:
     Regex would need hundreds of rules. The LLM handles
     all variations in one call.
     """
-    client = Anthropic()
+    client = AsyncAnthropic()
 
     try:
-        response = client.messages.create(
+        response = await client.messages.create(
             model=config.llm_model,
             max_tokens=500,
             system=JD_PARSE_PROMPT,
@@ -298,7 +301,7 @@ Sort by match_score descending (best match first).
 Return ONLY the JSON array. No markdown, no explanation."""
 
 
-def _rerank_with_llm(
+async def _rerank_with_llm(
     job_description: str,
     candidates: list[CandidateMatch],
     top_k: int,
@@ -322,7 +325,7 @@ def _rerank_with_llm(
     This is the Retrieval-Augmented Generation pattern:
       Retrieve (vector search) → Augment (add context) → Generate (LLM)
     """
-    client = Anthropic()
+    client = AsyncAnthropic()
 
     # Build candidate summaries for the LLM
     candidate_info = []
@@ -345,7 +348,7 @@ CANDIDATES:
 Rank these candidates by match quality. Return top {top_k}."""
 
     try:
-        response = client.messages.create(
+        response = await client.messages.create(
             model=config.llm_model,
             max_tokens=2000,
             system=RERANK_PROMPT,

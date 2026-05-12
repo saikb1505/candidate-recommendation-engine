@@ -24,6 +24,7 @@ WHY a separate runner file?
   - Testing pipeline.py doesn't require simulating CLI args
 """
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -34,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from ingestion.pipeline import process_batch, process_batch_concurrent
 
 
-def main():
+async def main():
     print("=" * 50)
     print("  Resume Matcher — Ingestion Pipeline")
     print("=" * 50)
@@ -61,12 +62,12 @@ def main():
 
     # Run the pipeline
     if concurrent:
-        results = process_batch_concurrent(
+        results = await process_batch_concurrent(
             resume_from_manifest=resume_from_manifest,
             max_workers=5,
         )
     else:
-        results = process_batch(
+        results = await process_batch(
             resume_from_manifest=resume_from_manifest,
         )
 
@@ -103,4 +104,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

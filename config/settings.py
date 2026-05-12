@@ -1,25 +1,10 @@
-"""
-Central configuration for the resume matcher.
-
-WHY Pydantic BaseModel?
-  - Type validation: catches typos like image_dpi="high" (should be int)
-  - Easy to extend: add new settings without rewriting anything
-  - Serializable: can dump to JSON for logging/debugging
-  - FastAPI uses Pydantic too, so when you add the API layer,
-    your config and request/response models use the same pattern
-
-WHY a global instance?
-  Every module does: from config.settings import config
-  This gives you one source of truth. No passing config
-  objects through 5 layers of function calls.
-"""
-
 from pathlib import Path
-from pydantic import BaseModel
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class AppConfig(BaseModel):
-    """All settings for the resume matcher pipeline."""
+class AppConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # --- Paths ---
     resume_dir: Path = Path("data/sample_resumes")
@@ -37,18 +22,29 @@ class AppConfig(BaseModel):
     # --- LLM settings ---
     groq_model: str = "llama-3.3-70b-versatile"
     openai_vision_model: str = "gpt-4o-mini"
+    llm_model: str = "claude-haiku-4-5-20251001"
     max_tokens: int = 4096
-    image_dpi: int = 150       # 150 DPI ≈ 1,600 tokens/page (vision fallback)
+    image_dpi: int = 150
 
     # --- Processing ---
-    batch_size: int = 100      # files per processing batch
-    max_retries: int = 3       # retry failed extractions
+    batch_size: int = 100
+    max_retries: int = 3
+
+    # --- Database ---
+    database_url: str = "postgresql+asyncpg://user:password@localhost/resume_matcher"
+
+    # --- Redis / Celery ---
+    redis_url: str = "redis://localhost:6379/0"
+
+    # --- Storage ---
+    storage_backend: str = "local"          # "local" or "s3"
+    local_upload_dir: Path = Path("data/uploads")
+    s3_bucket: str = "resume-matcher-files"
+    aws_region: str = "us-east-1"
 
     def ensure_dirs(self):
-        """Create all output directories if they don't exist."""
-        for d in [self.output_dir, self.json_dir, self.failed_dir]:
+        for d in [self.output_dir, self.json_dir, self.failed_dir, self.local_upload_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
 
-# Single global instance — import this everywhere
 config = AppConfig()

@@ -1,4 +1,5 @@
 pydantic
+pydantic-settings
 python-magic
 pdf2image
 Pillow
@@ -7,3 +8,14 @@ groq
 openai
 sentence_transformers
 chromadb
+fastapi
+uvicorn[standard]
+python-multipart
+boto3
+sqlalchemy[asyncio]
+asyncpg
+alembic
+celery[redis]
+redis
+alembic
+psycopg2

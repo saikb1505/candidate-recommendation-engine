@@ -7,11 +7,12 @@ Fallback path: file → converter.py → base64 images → GPT-4o-mini vision �
 Images are only produced if Groq fails — lazy conversion on demand.
 """
 
+import asyncio
 import json
 from datetime import date
 
-from groq import Groq
-from openai import OpenAI
+from groq import AsyncGroq
+from openai import AsyncOpenAI
 
 from config.settings import config
 from ingestion.converter import convert_to_images
@@ -81,15 +82,15 @@ def _to_markdown(file_path: str) -> str:
     return result.document.export_to_markdown()
 
 
-def _extract_with_groq(file_path: str) -> dict:
+async def _extract_with_groq(file_path: str) -> dict:
     try:
-        markdown = _to_markdown(file_path)
+        markdown = await asyncio.to_thread(_to_markdown, file_path)
     except Exception as e:
         return {"_error": f"docling conversion failed: {e}"}
 
     try:
-        client = Groq()
-        response = client.chat.completions.create(
+        client = AsyncGroq()
+        response = await client.chat.completions.create(
             model=config.groq_model,
             messages=[
                 {"role": "system", "content": _build_system_prompt()},
@@ -110,8 +111,8 @@ def _extract_with_groq(file_path: str) -> dict:
 #  FALLBACK PATH — GPT-4o-mini vision (images)
 # ──────────────────────────────────────────────
 
-def _extract_with_vision(file_path: str, file_type: str) -> dict:
-    conversion = convert_to_images(file_path, file_type)
+async def _extract_with_vision(file_path: str, file_type: str) -> dict:
+    conversion = await asyncio.to_thread(convert_to_images, file_path, file_type)
     if not conversion.success:
         return {"_error": f"Image conversion failed: {conversion.error}"}
 
@@ -128,8 +129,8 @@ def _extract_with_vision(file_path: str, file_type: str) -> dict:
     })
 
     try:
-        client = OpenAI()
-        response = client.chat.completions.create(
+        client = AsyncOpenAI()
+        response = await client.chat.completions.create(
             model=config.openai_vision_model,
             messages=[
                 {"role": "system", "content": _build_system_prompt()},
@@ -159,18 +160,18 @@ def _groq_result_is_incomplete(result: dict) -> bool:
     return missing_contact or missing_experience
 
 
-def extract_resume_with_retry(file_path: str, file_type: str) -> dict:
+async def extract_resume_with_retry(file_path: str, file_type: str) -> dict:
     """
     Try Groq first (docling markdown → text LLM).
     Fall back to GPT-4o-mini vision if Groq fails or returns
     incomplete contact info (name/email/phone) or empty experience.
     """
-    result = _extract_with_groq(file_path)
+    result = await _extract_with_groq(file_path)
 
     if "_error" not in result and not _groq_result_is_incomplete(result):
         return result
 
-    return _extract_with_vision(file_path, file_type)
+    return await _extract_with_vision(file_path, file_type)
 
 
 # ──────────────────────────────────────────────

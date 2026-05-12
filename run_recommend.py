@@ -12,6 +12,7 @@ Prerequisites:
     - ANTHROPIC_API_KEY set (for smart_match only)
 """
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -20,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from recommendation.ranker import fast_match, smart_match
 
 
-def main():
+async def main():
     print("=" * 50)
     print("  Recommendation Engine")
     print("=" * 50)
@@ -30,7 +31,7 @@ def main():
     print("[Test 1] Fast match — vector search + filters")
     print()
 
-    results = fast_match(
+    results = await fast_match(
         query="Python backend developer with cloud experience",
         required_skills=["Python"],
         min_years=2,
@@ -69,7 +70,7 @@ def main():
     Location: Bangalore or Hyderabad (hybrid)
     """
 
-    results = smart_match(job_description=sample_jd, top_k=15)
+    results = await smart_match(job_description=sample_jd, top_k=15)
 
     print(f"\n  Top {len(results)} candidates:")
     print()
@@ -94,4 +95,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
