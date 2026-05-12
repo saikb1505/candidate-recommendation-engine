@@ -35,10 +35,10 @@ class AppConfig(BaseModel):
     }
 
     # --- LLM settings ---
-    llm_model: str = "claude-haiku-4-5-20251001"
-    llm_model_fallback: str = "claude-sonnet-4-6"
+    groq_model: str = "llama-3.3-70b-versatile"
+    openai_vision_model: str = "gpt-4o-mini"
     max_tokens: int = 4096
-    image_dpi: int = 150       # 150 DPI ≈ 1,600 tokens/page
+    image_dpi: int = 150       # 150 DPI ≈ 1,600 tokens/page (vision fallback)
 
     # --- Processing ---
     batch_size: int = 100      # files per processing batch

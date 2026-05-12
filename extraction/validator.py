@@ -53,6 +53,9 @@ def validate_resume(
         return None, data["_error"]
 
     try:
+        # Read extraction_method before cleaning strips it
+        extraction_method = data.get("_extraction_method", "unknown")
+
         # Clean the data before validation
         cleaned = _clean_raw_data(data)
 
@@ -61,7 +64,7 @@ def validate_resume(
 
         # Add tracking info
         resume.source_file = source_file
-        resume.extraction_method = "vision"
+        resume.extraction_method = extraction_method
 
         # Run business logic checks
         issues = _check_data_quality(resume)

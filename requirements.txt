@@ -2,6 +2,8 @@ pydantic
 python-magic
 pdf2image
 Pillow
-anthropic
+docling
+groq
+openai
 sentence_transformers
 chromadb

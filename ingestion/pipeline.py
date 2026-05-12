@@ -42,7 +42,6 @@ from ingestion.scanner import (
     FileRecord,
     ProcessingStatus,
 )
-from ingestion.converter import convert_to_images
 from extraction.llm_extractor import extract_resume_with_retry
 from extraction.validator import validate_resume
 
@@ -75,15 +74,10 @@ def process_single(file_path: str, file_type: str) -> tuple[ResumeSchema | None,
     """
     filename = Path(file_path).name
 
-    # Step 1: Convert to images
-    conversion = convert_to_images(file_path, file_type)
-    if not conversion.success:
-        return None, f"Conversion failed: {conversion.error}"
+    # Step 1: Extract JSON via LLM (conversion happens lazily inside on fallback)
+    raw_data = extract_resume_with_retry(file_path, file_type)
 
-    # Step 2: Extract JSON via LLM
-    raw_data = extract_resume_with_retry(conversion.images)
-
-    # Step 3: Validate and clean
+    # Step 2: Validate and clean
     resume, error = validate_resume(raw_data, source_file=filename)
 
     return resume, error

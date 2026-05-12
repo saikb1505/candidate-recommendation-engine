@@ -1,0 +1,10 @@
+[
+  {
+    "path": "data/sample_resumes/mohit.pdf",
+    "file_type": "pdf",
+    "size_bytes": 55975,
+    "status": "json_extracted",
+    "error_message": "",
+    "file_hash": "4a4eeb7d31f6ac2c12fdf378aeddf137"
+  }
+]
