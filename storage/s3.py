@@ -24,7 +24,6 @@ def _local_download(s3_key: str) -> bytes:
 
 def _local_delete(s3_key: str) -> None:
     path = _local_path(s3_key)
-    breakpoint()
     if path.exists():
         path.unlink()
 
@@ -56,8 +55,8 @@ def _s3_download(s3_key: str) -> bytes:
 def _s3_delete(s3_key: str) -> None:
     try:
         _s3_client().delete_object(Bucket=config.s3_bucket, Key=s3_key)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[s3] Failed to delete {s3_key}: {e}")
 
 
 # ──────────────────────────────────────────────

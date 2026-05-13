@@ -1,10 +1,10 @@
 """
-LLM-based resume extractor.
+Resume extractor.
 
-Primary path:  file → docling → markdown → Groq (text LLM) → JSON
-Fallback path: file → converter.py → base64 images → GPT-4o-mini vision → JSON
+Primary:  file → docling → markdown → Groq (text LLM) → JSON
+Fallback: file → base64 images → GPT-4o-mini vision → JSON
 
-Images are only produced if Groq fails — lazy conversion on demand.
+Images are only produced if Groq fails or returns incomplete contact info.
 """
 
 import asyncio
@@ -17,10 +17,6 @@ from openai import AsyncOpenAI
 from config.settings import config
 from ingestion.converter import convert_to_images
 
-
-# ──────────────────────────────────────────────
-#  SYSTEM PROMPT  (shared by both paths)
-# ──────────────────────────────────────────────
 
 def _build_system_prompt() -> str:
     today = date.today().strftime("%b %Y")
@@ -71,10 +67,6 @@ REQUIRED JSON STRUCTURE:
 Remember: ONLY output the JSON object. Nothing else."""
 
 
-# ──────────────────────────────────────────────
-#  PRIMARY PATH — Groq (markdown text)
-# ──────────────────────────────────────────────
-
 def _to_markdown(file_path: str) -> str:
     from docling.document_converter import DocumentConverter
     converter = DocumentConverter()
@@ -106,10 +98,6 @@ async def _extract_with_groq(file_path: str) -> dict:
     except Exception as e:
         return {"_error": f"Groq API failed: {e}"}
 
-
-# ──────────────────────────────────────────────
-#  FALLBACK PATH — GPT-4o-mini vision (images)
-# ──────────────────────────────────────────────
 
 async def _extract_with_vision(file_path: str, file_type: str) -> dict:
     conversion = await asyncio.to_thread(convert_to_images, file_path, file_type)
@@ -147,25 +135,15 @@ async def _extract_with_vision(file_path: str, file_type: str) -> dict:
         return {"_error": f"OpenAI API failed: {e}"}
 
 
-# ──────────────────────────────────────────────
-#  ORCHESTRATOR
-# ──────────────────────────────────────────────
-
 def _groq_result_is_incomplete(result: dict) -> bool:
     contact = result.get("contact", {})
-    missing_contact = not (
-        contact.get("name") and contact.get("email") and contact.get("phone")
-    )
+    missing_contact = not (contact.get("name") and contact.get("email"))
     missing_experience = not result.get("experience")
     return missing_contact or missing_experience
 
 
 async def extract_resume_with_retry(file_path: str, file_type: str) -> dict:
-    """
-    Try Groq first (docling markdown → text LLM).
-    Fall back to GPT-4o-mini vision if Groq fails or returns
-    incomplete contact info (name/email/phone) or empty experience.
-    """
+    """Try Groq first; fall back to GPT-4o-mini vision if Groq fails or returns incomplete data."""
     result = await _extract_with_groq(file_path)
 
     if "_error" not in result and not _groq_result_is_incomplete(result):
@@ -173,10 +151,6 @@ async def extract_resume_with_retry(file_path: str, file_type: str) -> dict:
 
     return await _extract_with_vision(file_path, file_type)
 
-
-# ──────────────────────────────────────────────
-#  JSON PARSING  (shared by both paths)
-# ──────────────────────────────────────────────
 
 def _parse_json_response(text: str) -> dict:
     text = text.strip()

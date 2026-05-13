@@ -1,37 +1,8 @@
 """
-Recommendation engine — the payoff of your entire pipeline.
+Recommendation engine: takes a job description, returns ranked candidates.
 
-Takes a job description as input, returns ranked candidates.
-
-What it does:
-  1. Parse the JD to extract requirements (skills, years, location)
-  2. Search the vector DB (semantic + filters)
-  3. Re-rank results using an LLM for deeper matching
-  4. Return candidates with match explanations
-
-WHY re-rank with an LLM?
-  Vector search is fast but shallow — it matches on overall
-  similarity. A resume might score high because it mentions
-  many of the same words, even if the actual experience
-  doesn't fit.
-
-  Re-ranking sends the top candidates + the JD to Claude
-  and asks: "How well does this candidate actually match?"
-  This catches nuances that embeddings miss:
-    - "5 years required" but candidate has 2 years
-    - "Must lead a team" but candidate was individual contributor
-    - "Startup experience preferred" — embeddings don't capture this
-
-  Re-ranking is expensive (one LLM call per search), so we
-  only re-rank the top 20 candidates, not all 10K.
-
-TWO MODES:
-  fast_match:  vector search + filters only (free, instant)
-  smart_match: vector search + LLM re-ranking (costs ~$0.01, 2-3 seconds)
-
-  FastAPI can offer both:
-    GET  /match?q=...           → fast_match
-    POST /match (with JD body)  → smart_match
+fast_match:  vector search + metadata filters only (free, instant)
+smart_match: vector search + LLM re-ranking with explanations (~$0.01)
 """
 
 import asyncio
@@ -45,18 +16,8 @@ from embeddings.vector_store import search, search_with_skills
 from embeddings.embedder import embed_text
 
 
-# ──────────────────────────────────────────────
-#  RESULT FORMAT
-# ──────────────────────────────────────────────
-
 @dataclass
 class CandidateMatch:
-    """
-    A single candidate result with match details.
-
-    This is what the API returns for each candidate.
-    Clean, structured, ready for a frontend to display.
-    """
     rank: int
     name: str
     email: str
@@ -64,7 +25,7 @@ class CandidateMatch:
     skills: list[str]
     years_experience: float
     similarity_score: float
-    match_explanation: str = ""    # filled by LLM re-ranking
+    match_explanation: str = ""
     resume_id: str = ""
 
     def to_dict(self) -> dict:
@@ -81,10 +42,6 @@ class CandidateMatch:
         }
 
 
-# ──────────────────────────────────────────────
-#  FAST MATCH (vector search only, free)
-# ──────────────────────────────────────────────
-
 async def fast_match(
     query: str,
     required_skills: list[str] | None = None,
@@ -92,24 +49,6 @@ async def fast_match(
     location: str | None = None,
     top_k: int = 10,
 ) -> list[CandidateMatch]:
-    """
-    Quick candidate matching — vector search + filters.
-
-    Use this for:
-      - Instant results (no API call)
-      - Simple queries ("Python developer in Bangalore")
-      - When cost matters (completely free)
-
-    Args:
-        query: natural language description of what you need
-        required_skills: must-have skills
-        min_years: minimum experience
-        location: preferred location
-        top_k: number of results
-
-    Returns:
-        List of CandidateMatch objects, ranked by similarity.
-    """
     results = await asyncio.to_thread(
         search_with_skills,
         query_text=query,
@@ -122,36 +61,10 @@ async def fast_match(
     return _format_results(results)
 
 
-# ──────────────────────────────────────────────
-#  SMART MATCH (vector search + LLM re-ranking)
-# ──────────────────────────────────────────────
-
 async def smart_match(
     job_description: str,
     top_k: int = 10,
 ) -> list[CandidateMatch]:
-    """
-    Full recommendation pipeline — the main feature.
-
-    A recruiter pastes a complete job description.
-    The system:
-      1. Extracts requirements from the JD (skills, years, location)
-      2. Runs vector search with those filters
-      3. Sends top candidates to Claude for re-ranking
-      4. Returns candidates with match explanations
-
-    Args:
-        job_description: full JD text (can be paragraphs long)
-        top_k: number of final results to return
-
-    Returns:
-        List of CandidateMatch with explanations, best first.
-
-    Cost: ~$0.01-0.02 per search (one Haiku call for
-    parsing JD + one for re-ranking). Worth it for the
-    quality improvement over pure vector search.
-    """
-    # Step 1: Parse the JD to extract requirements
     print("  Parsing job description...")
     requirements = await _parse_job_description(job_description)
 
@@ -159,9 +72,8 @@ async def smart_match(
     print(f"    Min years: {requirements.get('min_years', 'any')}")
     print(f"    Location: {requirements.get('location', 'any')}")
 
-    # Step 2: Vector search with extracted filters
     print("  Searching candidates...")
-    fetch_k = min(top_k * 3, 30)  # fetch more for re-ranking
+    fetch_k = min(top_k * 3, 30)
 
     results = await asyncio.to_thread(
         search_with_skills,
@@ -173,7 +85,6 @@ async def smart_match(
     )
 
     if not results:
-        # Retry without filters if no results found
         print("  No filtered results, trying without filters...")
         results = await asyncio.to_thread(search, job_description, fetch_k)
 
@@ -181,7 +92,6 @@ async def smart_match(
         print("  No candidates found")
         return []
 
-    # Step 3: Re-rank with LLM
     print(f"  Re-ranking top {len(results)} candidates with LLM...")
     candidates = _format_results(results)
     ranked = await _rerank_with_llm(job_description, candidates, top_k)
@@ -189,11 +99,7 @@ async def smart_match(
     return ranked
 
 
-# ──────────────────────────────────────────────
-#  JD PARSING
-# ──────────────────────────────────────────────
-
-JD_PARSE_PROMPT = """You are a job description parser. Extract the key requirements 
+JD_PARSE_PROMPT = """You are a job description parser. Extract the key requirements
 from the job description below.
 
 Return ONLY valid JSON with this structure:
@@ -205,7 +111,7 @@ Return ONLY valid JSON with this structure:
 }
 
 RULES:
-1. skills: list the most important technical skills (max 5). 
+1. skills: list the most important technical skills (max 5).
    Use common names: "Python" not "python programming language".
 2. min_years: minimum years of experience mentioned. Use 0 if not specified.
 3. location: city/region if mentioned, null if remote or not specified.
@@ -215,24 +121,6 @@ Return ONLY the JSON. No markdown, no explanation."""
 
 
 async def _parse_job_description(jd_text: str) -> dict:
-    """
-    Extract structured requirements from a job description.
-
-    Sends the JD to Claude and gets back:
-      - Required skills (for metadata filtering)
-      - Minimum years (for metadata filtering)
-      - Location preference (for metadata filtering)
-      - Role summary (for semantic search)
-
-    WHY use an LLM for this?
-    Job descriptions are messy and inconsistent:
-      "3-5 years of Python experience" → min_years: 3
-      "Must be proficient in React and Node" → skills: ["React", "Node.js"]
-      "Based in our Bangalore office" → location: "Bangalore"
-
-    Regex would need hundreds of rules. The LLM handles
-    all variations in one call.
-    """
     client = AsyncAnthropic()
 
     try:
@@ -246,18 +134,9 @@ async def _parse_job_description(jd_text: str) -> dict:
         )
 
         raw_text = response.content[0].text.strip()
-
-        # Clean markdown if present
-        if raw_text.startswith("```"):
-            first_nl = raw_text.index("\n")
-            raw_text = raw_text[first_nl + 1:]
-            if raw_text.endswith("```"):
-                raw_text = raw_text[:-3]
-            raw_text = raw_text.strip()
-
+        raw_text = _strip_markdown_json(raw_text)
         parsed = json.loads(raw_text)
 
-        # Clean up
         result = {}
         if parsed.get("skills"):
             result["skills"] = parsed["skills"][:5]
@@ -272,15 +151,10 @@ async def _parse_job_description(jd_text: str) -> dict:
 
     except Exception as e:
         print(f"    JD parsing failed: {e}")
-        # Return empty — search will work without filters
         return {}
 
 
-# ──────────────────────────────────────────────
-#  LLM RE-RANKING
-# ──────────────────────────────────────────────
-
-RERANK_PROMPT = """You are a recruitment matching expert. Given a job description 
+RERANK_PROMPT = """You are a recruitment matching expert. Given a job description
 and a list of candidates, rank them by how well they match the role.
 
 For each candidate, provide:
@@ -292,7 +166,7 @@ Return ONLY valid JSON as a list:
     {
         "resume_id": "candidate_id_here",
         "match_score": 8,
-        "explanation": "Strong Python background with 5 years of API development. 
+        "explanation": "Strong Python background with 5 years of API development.
                         Lacks AWS experience mentioned in JD."
     }
 ]
@@ -306,34 +180,14 @@ async def _rerank_with_llm(
     candidates: list[CandidateMatch],
     top_k: int,
 ) -> list[CandidateMatch]:
-    """
-    Re-rank candidates using Claude for deeper matching.
-
-    The vector search gives us rough similarity. The LLM
-    reads both the JD and each candidate's profile to assess
-    actual fit — considering nuances like:
-      - Does their experience level match?
-      - Are the skills relevant or just keyword matches?
-      - Is their career trajectory aligned with this role?
-
-    WHY not use the LLM for initial search?
-    Sending all 10K resumes to an LLM would cost hundreds
-    of dollars and take hours. Vector search narrows it to
-    20-30 candidates in milliseconds for free. Then the LLM
-    only evaluates those 20-30 — costing ~$0.01.
-
-    This is the Retrieval-Augmented Generation pattern:
-      Retrieve (vector search) → Augment (add context) → Generate (LLM)
-    """
     client = AsyncAnthropic()
 
-    # Build candidate summaries for the LLM
     candidate_info = []
     for c in candidates:
         candidate_info.append({
             "resume_id": c.resume_id,
             "name": c.name,
-            "skills": c.skills[:15],  # limit to keep prompt short
+            "skills": c.skills[:15],
             "years_experience": c.years_experience,
             "location": c.location,
             "similarity_score": c.similarity_score,
@@ -357,19 +211,9 @@ Rank these candidates by match quality. Return top {top_k}."""
             ],
         )
 
-        raw_text = response.content[0].text.strip()
-
-        # Clean markdown
-        if raw_text.startswith("```"):
-            first_nl = raw_text.index("\n")
-            raw_text = raw_text[first_nl + 1:]
-            if raw_text.endswith("```"):
-                raw_text = raw_text[:-3]
-            raw_text = raw_text.strip()
-
+        raw_text = _strip_markdown_json(response.content[0].text.strip())
         rankings = json.loads(raw_text)
 
-        # Map LLM rankings back to candidates
         candidate_map = {c.resume_id: c for c in candidates}
         ranked = []
 
@@ -385,19 +229,13 @@ Rank these candidates by match quality. Return top {top_k}."""
 
     except Exception as e:
         print(f"    Re-ranking failed: {e}")
-        # Fall back to vector search order
         for i, c in enumerate(candidates[:top_k]):
             c.rank = i + 1
             c.match_explanation = "Ranked by semantic similarity"
         return candidates[:top_k]
 
 
-# ──────────────────────────────────────────────
-#  HELPERS
-# ──────────────────────────────────────────────
-
 def _format_results(results: list[dict]) -> list[CandidateMatch]:
-    """Convert raw search results to CandidateMatch objects."""
     candidates = []
 
     for i, result in enumerate(results):
@@ -417,3 +255,12 @@ def _format_results(results: list[dict]) -> list[CandidateMatch]:
         ))
 
     return candidates
+
+
+def _strip_markdown_json(text: str) -> str:
+    if text.startswith("```"):
+        first_nl = text.index("\n")
+        text = text[first_nl + 1:]
+        if text.endswith("```"):
+            text = text[:-3]
+    return text.strip()

@@ -1,30 +1,4 @@
-"""
-Pipeline orchestrator — runs the full ingestion flow.
-
-Connects all modules in sequence:
-  scan → DEDUP → convert → extract → validate → save
-
-WHY a separate orchestrator?
-  Each module (scanner, converter, extractor, validator) does
-  one thing and knows nothing about the others. The pipeline
-  is the only place that knows the full flow. This means:
-
-  - You can test each module independently
-  - You can swap modules (different LLM, different vector DB)
-    without touching the others
-  - FastAPI just calls pipeline functions — it doesn't need
-    to know about converters or validators
-  - You can run the pipeline from CLI, from an API endpoint,
-    or from a Jupyter notebook — same code
-
-WHY process_single + process_batch + process_batch_concurrent?
-  process_single: handles one resume end-to-end. This is what
-    FastAPI calls when a user uploads a single resume.
-  process_batch: handles many resumes sequentially with progress
-    tracking. Safe and simple.
-  process_batch_concurrent: handles many resumes in parallel.
-    5x faster but uses more resources.
-"""
+"""Pipeline orchestrator — scan → dedup → extract → validate → save."""
 
 import asyncio
 import json
@@ -46,69 +20,22 @@ from extraction.llm_extractor import extract_resume_with_retry
 from extraction.validator import validate_resume
 
 
-# ──────────────────────────────────────────────
-#  SINGLE RESUME PROCESSING
-# ──────────────────────────────────────────────
-
 async def process_single(file_path: str, file_type: str) -> tuple[ResumeSchema | None, str]:
-    """
-    Process one resume: convert → extract → validate.
-
-    Args:
-        file_path: path to the resume file
-        file_type: detected file type ("pdf", "docx", "image")
-
-    Returns:
-        Tuple of (ResumeSchema or None, error_message)
-
-    This is the core function. Everything else calls this.
-    FastAPI endpoint will call this directly:
-
-        @app.post("/extract")
-        async def extract(file: UploadFile):
-            # save file, detect type...
-            resume, error = await process_single(path, file_type)
-            if error:
-                raise HTTPException(400, error)
-            return resume
-    """
     filename = Path(file_path).name
-
-    # Step 1: Extract JSON via LLM (conversion happens lazily inside on fallback)
     raw_data = await extract_resume_with_retry(file_path, file_type)
-
-    # Step 2: Validate and clean
     resume, error = validate_resume(raw_data, source_file=filename)
-
     return resume, error
 
-
-# ──────────────────────────────────────────────
-#  SCAN + DEDUP (shared by both batch modes)
-# ──────────────────────────────────────────────
 
 def _get_records(
     resume_dir: Path | None = None,
     resume_from_manifest: bool = False,
 ) -> tuple[list[FileRecord], list[FileRecord]]:
-    """
-    Scan folder, deduplicate, and return records.
-
-    Returns:
-        Tuple of (all_records, pending_records)
-        all_records includes duplicates (for manifest tracking)
-        pending_records is what needs processing
-
-    WHY extract this into a helper?
-    Both process_batch and process_batch_concurrent need
-    the same scan + dedup logic. DRY — don't repeat yourself.
-    """
     if resume_from_manifest:
         try:
             all_records = load_manifest()
             print(f"  Loaded manifest: {len(all_records)} files")
 
-            # Split into pending vs already done
             pending = [
                 r for r in all_records
                 if r.status not in (
@@ -121,13 +48,8 @@ def _get_records(
         except FileNotFoundError:
             print("  No manifest found, scanning folder...")
 
-    # Fresh scan
     records = scan_folder(resume_dir)
-
-    # Deduplicate before extraction (saves API costs)
     unique, duplicates = deduplicate_records(records)
-
-    # Combine for manifest (track everything)
     all_records = unique + duplicates
     save_manifest(all_records)
 
@@ -138,20 +60,10 @@ def _get_records(
     return all_records, unique
 
 
-# ──────────────────────────────────────────────
-#  SEQUENTIAL BATCH PROCESSING
-# ──────────────────────────────────────────────
-
 async def process_batch(
     resume_dir: Path | None = None,
     resume_from_manifest: bool = False,
 ) -> dict:
-    """
-    Process all resumes sequentially (one at a time).
-
-    Safe, simple, easy to debug. Use this for small batches
-    or when you want to watch the output carefully.
-    """
     config.ensure_dirs()
 
     all_records, pending = _get_records(resume_dir, resume_from_manifest)
@@ -189,7 +101,6 @@ async def process_batch(
             results["succeeded"] += 1
             print(f"    OK: {resume.contact.name or 'name not found'}")
 
-        # Save manifest after each file (crash recovery)
         save_manifest(all_records)
 
     results["duration_seconds"] = round(time.time() - start_time, 2)
@@ -197,24 +108,11 @@ async def process_batch(
     return results
 
 
-# ──────────────────────────────────────────────
-#  CONCURRENT BATCH PROCESSING
-# ──────────────────────────────────────────────
-
 async def process_batch_concurrent(
     resume_dir: Path | None = None,
     resume_from_manifest: bool = False,
     max_workers: int = 5,
 ) -> dict:
-    """
-    Process resumes with concurrent async API calls.
-
-    Args:
-        max_workers: max concurrent API calls in flight at once.
-            5 is safe for most API rate limits.
-            Increase to 10 if you have higher tier access.
-            Decrease to 3 if you see 429 rate limit errors.
-    """
     config.ensure_dirs()
 
     all_records, pending = _get_records(resume_dir, resume_from_manifest)
@@ -285,12 +183,7 @@ async def process_batch_concurrent(
     return results
 
 
-# ──────────────────────────────────────────────
-#  HELPERS
-# ──────────────────────────────────────────────
-
 def _print_summary(results: dict):
-    """Print a formatted summary of processing results."""
     print(f"\n  {'=' * 40}")
     print(f"  Done in {results['duration_seconds']}s")
     print(f"  Succeeded:  {results['succeeded']}")
@@ -301,31 +194,13 @@ def _print_summary(results: dict):
 
 
 def _save_json(resume: ResumeSchema, filename: str):
-    """
-    Save validated resume JSON to the output directory.
-
-    File naming: original_name.pdf → original_name.json
-    This makes it easy to trace back from JSON to source file.
-    """
     json_filename = Path(filename).stem + ".json"
     output_path = config.json_dir / json_filename
-
     data = resume.model_dump()
     output_path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
 
 def load_json(filename: str) -> ResumeSchema | None:
-    """
-    Load a previously extracted resume JSON.
-
-    Useful for:
-      - Debugging: inspect what was extracted
-      - Re-validation: run updated validator on old data
-      - Embedding: load JSON → to_embedding_text() → embed
-      - FastAPI: serve resume data without re-extracting
-
-    Returns None if file doesn't exist.
-    """
     json_path = config.json_dir / filename
     if not json_path.exists():
         return None
