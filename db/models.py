@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Float, Integer, Text, DateTime, ForeignKey
+from sqlalchemy import String, Float, Integer, Text, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.orm import DeclarativeBase, mapped_column, Mapped, relationship
 
@@ -15,7 +15,7 @@ class Candidate(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String, default="")
-    email: Mapped[str] = mapped_column(String, default="", index=True)
+    email: Mapped[str | None] = mapped_column(String, default=None, index=True, unique=True)
     phone: Mapped[str] = mapped_column(String, default="")
     location: Mapped[str] = mapped_column(String, default="")
     skills: Mapped[list] = mapped_column(ARRAY(String), default=list)
@@ -48,6 +48,9 @@ class JobPost(Base):
 
 class CandidateJobMatch(Base):
     __tablename__ = "candidate_job_matches"
+    __table_args__ = (
+        UniqueConstraint("candidate_id", "job_post_id", name="uq_candidate_job"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     candidate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("candidates.id"))

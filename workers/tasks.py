@@ -4,12 +4,13 @@ import uuid
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.pool import NullPool
 
 from workers.celery_app import celery_app
 from db.models import Candidate, JobPost, CandidateJobMatch
-from storage.s3 import download_file
+from storage.s3 import download_file, delete_file
 from ingestion.pipeline import process_single
 from embeddings.vector_store import add_resume
 from recommendation.ranker import smart_match
@@ -36,6 +37,10 @@ def _make_session():
 def ingest_resume(self, s3_key: str, candidate_id: str):
     try:
         asyncio.run(_ingest_resume(s3_key, candidate_id))
+    except IntegrityError:
+        # Duplicate email is permanent — retrying will never resolve it.
+        # The inner handler already deleted the row and S3 file.
+        pass
     except Exception as exc:
         raise self.retry(exc=exc)
 
@@ -74,6 +79,23 @@ async def _ingest_resume(s3_key: str, candidate_id: str):
                 print(f"[ingest_resume] extraction failed: {error}")
                 candidate.status = "failed"
             else:
+                # Check for any existing candidate with this email (any status)
+                if resume.contact.email:
+                    dup_result = await session.execute(
+                        select(Candidate).where(
+                            Candidate.email == resume.contact.email,
+                            Candidate.id != uuid.UUID(candidate_id),
+                        )
+                    )
+                    existing = dup_result.scalar_one_or_none()
+                    if existing:
+                        print(f"[ingest_resume] duplicate email {resume.contact.email!r}, "
+                              f"deleting {candidate_id} (duplicate of {existing.id})")
+                        await session.delete(candidate)
+                        await session.commit()
+                        delete_file(s3_key)
+                        return
+
                 candidate.name = resume.contact.name
                 candidate.email = resume.contact.email
                 candidate.phone = resume.contact.phone
@@ -88,8 +110,23 @@ async def _ingest_resume(s3_key: str, candidate_id: str):
 
                 add_resume(resume, candidate_id)
 
-            await session.commit()
-            print(f"[ingest_resume] committed candidate {candidate_id} status={candidate.status}")
+            try:
+                await session.commit()
+                print(f"[ingest_resume] committed candidate {candidate_id} status={candidate.status}")
+            except IntegrityError:
+                # Race condition: another worker committed the same email just before us.
+                # Discard the broken session and use a fresh one to mark as duplicate.
+                await session.rollback()
+                async with Session() as session2:
+                    result2 = await session2.execute(
+                        select(Candidate).where(Candidate.id == uuid.UUID(candidate_id))
+                    )
+                    candidate2 = result2.scalar_one_or_none()
+                    if candidate2:
+                        await session2.delete(candidate2)
+                        await session2.commit()
+                delete_file(s3_key)
+                print(f"[ingest_resume] race-condition duplicate for {candidate_id}, deleted row and S3 file")
     finally:
         if tmp_path:
             Path(tmp_path).unlink(missing_ok=True)
@@ -133,13 +170,25 @@ async def _process_job_post(job_post_id: str):
                 if not candidate:
                     continue
 
-                session.add(CandidateJobMatch(
-                    candidate_id=candidate.id,
-                    job_post_id=job_post.id,
-                    match_score=score,
-                    match_explanation=match.match_explanation,
-                    similarity_score=match.similarity_score,
-                ))
+                existing_match_result = await session.execute(
+                    select(CandidateJobMatch).where(
+                        CandidateJobMatch.candidate_id == candidate.id,
+                        CandidateJobMatch.job_post_id == job_post.id,
+                    )
+                )
+                existing_match = existing_match_result.scalar_one_or_none()
+                if existing_match:
+                    existing_match.match_score = score
+                    existing_match.match_explanation = match.match_explanation
+                    existing_match.similarity_score = match.similarity_score
+                else:
+                    session.add(CandidateJobMatch(
+                        candidate_id=candidate.id,
+                        job_post_id=job_post.id,
+                        match_score=score,
+                        match_explanation=match.match_explanation,
+                        similarity_score=match.similarity_score,
+                    ))
 
             job_post.status = "processed"
             await session.commit()

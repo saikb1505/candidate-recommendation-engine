@@ -24,6 +24,7 @@ def _local_download(s3_key: str) -> bytes:
 
 def _local_delete(s3_key: str) -> None:
     path = _local_path(s3_key)
+    breakpoint()
     if path.exists():
         path.unlink()
 

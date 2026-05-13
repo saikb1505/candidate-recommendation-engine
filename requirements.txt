@@ -17,5 +17,3 @@ asyncpg
 alembic
 celery[redis]
 redis
-alembic
-psycopg2
