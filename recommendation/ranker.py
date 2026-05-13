@@ -27,6 +27,7 @@ class CandidateMatch:
     similarity_score: float
     match_explanation: str = ""
     resume_id: str = ""
+    resume_text: str = ""      # embedding text — used by LLM re-ranker, not returned to API
 
     def to_dict(self) -> dict:
         return {
@@ -187,10 +188,9 @@ async def _rerank_with_llm(
         candidate_info.append({
             "resume_id": c.resume_id,
             "name": c.name,
-            "skills": c.skills[:15],
             "years_experience": c.years_experience,
             "location": c.location,
-            "similarity_score": c.similarity_score,
+            "resume": c.resume_text,
         })
 
     prompt = f"""JOB DESCRIPTION:
@@ -252,6 +252,7 @@ def _format_results(results: list[dict]) -> list[CandidateMatch]:
             years_experience=metadata.get("total_years_experience", 0),
             similarity_score=result["score"],
             resume_id=result["id"],
+            resume_text=result.get("document", ""),
         ))
 
     return candidates
