@@ -45,7 +45,10 @@ async def upload_resume(
     candidate_id = str(uuid.uuid4())
     s3_key = f"{candidate_id}{suffix}"
 
-    content = await file.read()
+    content = await file.read(config.max_upload_bytes + 1)
+    if len(content) > config.max_upload_bytes:
+        raise HTTPException(413, f"File exceeds maximum size of {config.max_upload_bytes // (1024 * 1024)} MB")
+
     upload_file(content, s3_key, file.content_type or "application/octet-stream")
 
     candidate = Candidate(id=uuid.UUID(candidate_id), s3_key=s3_key, status="pending")

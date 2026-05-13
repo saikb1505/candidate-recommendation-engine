@@ -29,6 +29,7 @@ class AppConfig(BaseSettings):
     # --- Processing ---
     batch_size: int = 100
     max_retries: int = 3
+    max_upload_bytes: int = 10 * 1024 * 1024  # 10 MB
 
     # --- Database ---
     database_url: str = "postgresql+asyncpg://user:password@localhost/resume_matcher"
