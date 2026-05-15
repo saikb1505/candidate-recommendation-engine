@@ -46,7 +46,7 @@ def _clean_raw_data(data: dict) -> dict:
         data["contact"] = {}
 
     known_top_fields = {
-        "contact", "summary", "skills", "total_years_experience",
+        "contact", "summary", "skills", "companies", "total_years_experience",
         "highest_education", "experience", "education",
         "source_file", "extraction_method",
     }

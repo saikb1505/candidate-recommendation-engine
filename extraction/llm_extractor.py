@@ -31,6 +31,7 @@ RULES:
 4. For total_years_experience, sum the years across all experience entries. Treat "Present"/"Current" as {today}.
 5. Skills should be individual items: ["Python", "AWS"] not ["Python and AWS"].
 6. For experience descriptions, capture what the person DID, not their job title again.
+7. Extract all company names: ["Company 1", "Company 2"] from experience.
 
 REQUIRED JSON STRUCTURE:
 {{
@@ -61,7 +62,8 @@ REQUIRED JSON STRUCTURE:
             "institution": "University Name",
             "graduation_year": "2020"
         }}
-    ]
+    ],
+    "companies": ["Company 1", "Company 2"]
 }}
 
 Remember: ONLY output the JSON object. Nothing else."""

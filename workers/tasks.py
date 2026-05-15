@@ -9,12 +9,13 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.pool import NullPool
 
 from workers.celery_app import celery_app
-from db.models import Candidate, JobPost, CandidateJobMatch
+from db.models import Candidate, Company, JobPost, CandidateJobMatch
 from storage.s3 import download_file, delete_file
 from ingestion.pipeline import process_single
 from embeddings.vector_store import add_resume
 from recommendation.ranker import smart_match
 from config.settings import config
+
 
 
 def _make_session():
@@ -107,6 +108,13 @@ async def _ingest_resume(s3_key: str, candidate_id: str):
                 candidate.chroma_id = candidate_id
                 candidate.raw_data = resume.model_dump()
                 candidate.status = "processed"
+
+                for company_name in resume.companies:
+                    existing_company = await session.scalar(
+                        select(Company).where(Company.name == company_name)
+                    )
+                    if not existing_company:
+                        session.add(Company(name=company_name, source="Resume"))
 
                 add_resume(resume, candidate_id)
 

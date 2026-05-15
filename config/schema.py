@@ -28,6 +28,7 @@ class ResumeSchema(BaseModel):
 
     # Filterable metadata (exact/range match in vector DB)
     skills: list[str] = Field(default_factory=list)
+    companies: list[str] = Field(default_factory=list)
     total_years_experience: float = 0.0
     highest_education: str = ""
 

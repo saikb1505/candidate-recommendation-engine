@@ -46,6 +46,15 @@ class JobPost(Base):
     matches: Mapped[list["CandidateJobMatch"]] = relationship(back_populates="job_post")
 
 
+class Company(Base):
+    __tablename__ = "companies"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String, unique=True, index=True)
+    source: Mapped[str] = mapped_column(String, default="Resume")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class CandidateJobMatch(Base):
     __tablename__ = "candidate_job_matches"
     __table_args__ = (
