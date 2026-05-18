@@ -63,11 +63,6 @@ class ResumeSchema(BaseModel):
         return ". ".join(parts)
 
     def to_metadata(self) -> dict:
-        """
-        Skills are stored as a comma-separated string because ChromaDB 1.5+
-        doesn't support $contains on string fields. Skill filtering is done
-        in Python post-retrieval instead.
-        """
         return {
             "name": self.contact.name,
             "email": self.contact.email,

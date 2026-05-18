@@ -17,7 +17,7 @@ Structured JSON (name, skills, experience, education…)
     ↓
 Duplicate check (by email in Postgres)
     ↓
-ChromaDB (768-dim vectors via sentence-transformers)
+pgvector (768-dim vectors via sentence-transformers)
     ↓
 POST /jobs/ → Celery worker: process_job_post
     ↓
@@ -74,7 +74,7 @@ Both paths return the same JSON schema: contact info, title, summary, skills, to
 
 **`smart_match`** — used for job posts:
 1. Claude Haiku parses the job description → `{ skills, min_years, location, role_summary }`
-2. ChromaDB returns up to 30 candidates filtered by those requirements
+2. pgvector returns up to 30 candidates filtered by those requirements
 3. Claude Haiku re-ranks them with a 1–10 match score and a two-sentence explanation per candidate
 4. Top matches are written to `candidate_job_matches` in Postgres
 
@@ -139,7 +139,7 @@ For processing a local folder of resumes outside the API:
 # Extract resumes from data/sample_resumes/ (concurrent, 5 workers)
 python run_pipeline.py --concurrent
 
-# Deduplicate and embed extracted resumes into ChromaDB
+# Embed extracted resumes into pgvector
 python run_embeddings.py
 
 # Interactive recommendation test
@@ -161,7 +161,7 @@ extraction/
   validator.py                Cleans and validates LLM output against schema
 embeddings/
   embedder.py                 sentence-transformers wrapper (all-mpnet-base-v2)
-  vector_store.py             ChromaDB: add, search, metadata filter
+  vector_store.py             pgvector: semantic search, metadata filter
 deduplication/
   dedup.py                    Contact-based dedup (email / phone / name+location)
 recommendation/
@@ -177,7 +177,7 @@ workers/
 
 ## Data models
 
-**Candidate** — `id`, `name`, `email` (unique), `phone`, `location`, `skills[]`, `total_years_experience`, `highest_education`, `summary`, `s3_key`, `chroma_id`, `status`, `raw_data` (full JSON), `created_at`
+**Candidate** — `id`, `name`, `email` (unique), `phone`, `location`, `skills[]`, `total_years_experience`, `highest_education`, `summary`, `s3_key`, `status`, `embedding` (768-dim), `embedding_text`, `raw_data` (full JSON), `created_at`
 
 **JobPost** — `id`, `title`, `description`, `required_skills[]`, `min_years`, `location`, `status`, `created_at`
 

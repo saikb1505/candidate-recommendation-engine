@@ -105,7 +105,6 @@ async def _ingest_resume(s3_key: str, candidate_id: str):
                 candidate.total_years_experience = resume.total_years_experience
                 candidate.highest_education = resume.highest_education
                 candidate.summary = resume.summary
-                candidate.chroma_id = candidate_id
                 candidate.raw_data = resume.model_dump()
                 candidate.status = "processed"
 

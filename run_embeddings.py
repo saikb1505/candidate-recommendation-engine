@@ -4,8 +4,7 @@ Backfill embeddings for candidates already in Postgres, then run sample searches
 Usage:
     python run_embeddings.py
 
-Useful after migrating from ChromaDB or after manually inserting candidates
-that don't have embeddings yet.
+Useful after manually inserting candidates that don't have embeddings yet.
 """
 import asyncio
 import sys

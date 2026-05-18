@@ -8,7 +8,7 @@ Tests both fast_match (free, instant) and smart_match
 (LLM-powered, ~$0.01 per search) with sample job descriptions.
 
 Prerequisites:
-    - Embeddings stored in ChromaDB (run run_embeddings.py first)
+    - Embeddings stored in pgvector (run run_embeddings.py first)
     - ANTHROPIC_API_KEY set (for smart_match only)
 """
 
