@@ -12,7 +12,7 @@ from workers.celery_app import celery_app
 from db.models import Candidate, Company, JobPost, CandidateJobMatch
 from storage.s3 import download_file, delete_file
 from ingestion.pipeline import process_single
-from embeddings.vector_store import add_resume
+from embeddings.embedder import embed_resume
 from recommendation.ranker import smart_match
 from config.settings import config
 
@@ -116,7 +116,9 @@ async def _ingest_resume(s3_key: str, candidate_id: str):
                     if not existing_company:
                         session.add(Company(name=company_name, source="Resume"))
 
-                add_resume(resume, candidate_id)
+                assert resume is not None
+                candidate.embedding = embed_resume(resume)
+                candidate.embedding_text = resume.to_embedding_text()
 
             try:
                 await session.commit()
@@ -166,13 +168,13 @@ async def _process_job_post(job_post_id: str):
                 print(f"[process_job_post] job_post {job_post_id} not found in DB")
                 return
 
-            matches = await smart_match(job_description=job_post.description, top_k=20)
+            matches = await smart_match(job_description=job_post.description, top_k=20, session=session)
 
             for match in matches:
                 score = min(100, round(match.similarity_score * 100))
 
                 candidate_result = await session.execute(
-                    select(Candidate).where(Candidate.chroma_id == match.resume_id)
+                    select(Candidate).where(Candidate.id == uuid.UUID(match.resume_id))
                 )
                 candidate = candidate_result.scalar_one_or_none()
                 if not candidate:

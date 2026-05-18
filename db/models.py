@@ -4,6 +4,7 @@ from datetime import datetime
 from sqlalchemy import String, Float, Integer, Text, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.orm import DeclarativeBase, mapped_column, Mapped, relationship
+from pgvector.sqlalchemy import Vector
 
 
 class Base(DeclarativeBase):
@@ -25,6 +26,8 @@ class Candidate(Base):
     s3_key: Mapped[str] = mapped_column(String)
     chroma_id: Mapped[str] = mapped_column(String, default="")
     status: Mapped[str] = mapped_column(String, default="pending")
+    embedding: Mapped[list | None] = mapped_column(Vector(768), nullable=True)
+    embedding_text: Mapped[str] = mapped_column(Text, default="")
     raw_data: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

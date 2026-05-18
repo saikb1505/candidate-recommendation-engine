@@ -7,7 +7,7 @@ docling
 groq
 openai
 sentence_transformers
-chromadb
+pgvector
 fastapi
 uvicorn[standard]
 python-multipart

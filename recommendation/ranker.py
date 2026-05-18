@@ -5,15 +5,14 @@ fast_match:  vector search + metadata filters only (free, instant)
 smart_match: vector search + LLM re-ranking with explanations (~$0.01)
 """
 
-import asyncio
 import json
 from dataclasses import dataclass
 
 from anthropic import AsyncAnthropic
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import config
 from embeddings.vector_store import search, search_with_skills
-from embeddings.embedder import embed_text
 
 
 @dataclass
@@ -49,14 +48,15 @@ async def fast_match(
     min_years: float | None = None,
     location: str | None = None,
     top_k: int = 10,
+    session: AsyncSession | None = None,
 ) -> list[CandidateMatch]:
-    results = await asyncio.to_thread(
-        search_with_skills,
+    results = await search_with_skills(
         query_text=query,
         required_skills=required_skills,
         min_years=min_years,
         location=location,
         top_k=top_k,
+        session=session,
     )
 
     return _format_results(results)
@@ -65,6 +65,7 @@ async def fast_match(
 async def smart_match(
     job_description: str,
     top_k: int = 10,
+    session: AsyncSession | None = None,
 ) -> list[CandidateMatch]:
     print("  Parsing job description...")
     requirements = await _parse_job_description(job_description)
@@ -76,18 +77,18 @@ async def smart_match(
     print("  Searching candidates...")
     fetch_k = min(top_k * 3, 30)
 
-    results = await asyncio.to_thread(
-        search_with_skills,
+    results = await search_with_skills(
         query_text=job_description,
         required_skills=requirements.get("skills"),
         min_years=requirements.get("min_years"),
         location=requirements.get("location"),
         top_k=fetch_k,
+        session=session,
     )
 
     if not results:
         print("  No filtered results, trying without filters...")
-        results = await asyncio.to_thread(search, job_description, fetch_k)
+        results = await search(job_description, fetch_k, session=session)
 
     if not results:
         print("  No candidates found")

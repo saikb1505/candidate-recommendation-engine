@@ -1,132 +1,92 @@
-import chromadb
-from pathlib import Path
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.settings import config
-from config.schema import ResumeSchema
-from embeddings.embedder import embed_text, embed_resume
+from db.session import AsyncSessionLocal
+from embeddings.embedder import embed_text
 
-
-_client: chromadb.PersistentClient | None = None
-_collection: chromadb.Collection | None = None
-
-COLLECTION_NAME = "resumes"
+EMBEDDING_DIM = 768
 
 
-def get_collection() -> chromadb.Collection:
-    global _client, _collection
-
-    if _collection is None:
-        db_path = str(config.output_dir / "chromadb")
-        _client = chromadb.PersistentClient(path=db_path)
-        _collection = _client.get_or_create_collection(
-            name=COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"},
-        )
-        print(f"  ChromaDB collection '{COLLECTION_NAME}': "
-              f"{_collection.count()} documents")
-
-    return _collection
+def _to_pg_vector(embedding: list[float]) -> str:
+    """Format a float list as a Postgres vector literal."""
+    return "[" + ",".join(str(v) for v in embedding) + "]"
 
 
-def add_resume(resume: ResumeSchema, resume_id: str) -> bool:
-    collection = get_collection()
-
-    try:
-        embedding = embed_resume(resume)
-        metadata = resume.to_metadata()
-        document = resume.to_embedding_text()
-
-        collection.upsert(
-            ids=[resume_id],
-            embeddings=[embedding],
-            metadatas=[metadata],
-            documents=[document],
-        )
-        return True
-
-    except Exception as e:
-        print(f"  Failed to add {resume_id}: {e}")
-        return False
-
-
-def add_resumes_batch(
-    resumes: list[ResumeSchema],
-    resume_ids: list[str],
-) -> int:
-    collection = get_collection()
-
-    from embeddings.embedder import embed_resumes_batch
-
-    try:
-        embeddings = embed_resumes_batch(resumes)
-        metadatas = [r.to_metadata() for r in resumes]
-        documents = [r.to_embedding_text() for r in resumes]
-
-        collection.upsert(
-            ids=resume_ids,
-            embeddings=embeddings,
-            metadatas=metadatas,
-            documents=documents,
-        )
-
-        print(f"  Added {len(resumes)} resumes to vector store")
-        return len(resumes)
-
-    except Exception as e:
-        print(f"  Batch insert failed: {e}")
-        return 0
-
-
-def search(
+async def search(
     query_text: str,
     top_k: int = 10,
-    filters: dict | None = None,
+    min_years: float | None = None,
+    session: AsyncSession | None = None,
 ) -> list[dict]:
-    collection = get_collection()
-
     query_embedding = embed_text(query_text)
+    vec_str = _to_pg_vector(query_embedding)
 
-    query_args = {
-        "query_embeddings": [query_embedding],
-        "n_results": top_k,
-    }
+    where_clause = "WHERE embedding IS NOT NULL AND status = 'processed'"
+    params: dict = {"top_k": top_k, "vec": vec_str}
 
-    if filters:
-        query_args["where"] = filters
+    if min_years is not None:
+        where_clause += " AND total_years_experience >= :min_years"
+        params["min_years"] = min_years
 
-    results = collection.query(**query_args)
+    sql = text(f"""
+        SELECT
+            id::text,
+            name,
+            email,
+            location,
+            array_to_string(skills, ', ') AS skills,
+            total_years_experience,
+            highest_education,
+            embedding_text,
+            1 - (embedding <=> CAST(:vec AS vector)) AS score
+        FROM candidates
+        {where_clause}
+        ORDER BY embedding <=> CAST(:vec AS vector)
+        LIMIT :top_k
+    """)
 
-    formatted = []
-    for i in range(len(results["ids"][0])):
-        formatted.append({
-            "id": results["ids"][0][i],
-            "score": round(1 - results["distances"][0][i], 4),
-            "metadata": results["metadatas"][0][i],
-            "document": results["documents"][0][i],
-        })
+    async def _execute(s: AsyncSession) -> list:
+        return (await s.execute(sql, params)).mappings().all()
 
-    return formatted
+    if session is not None:
+        rows = await _execute(session)
+    else:
+        async with AsyncSessionLocal() as s:
+            rows = await _execute(s)
+
+    return [
+        {
+            "id": row["id"],
+            "score": round(float(row["score"]), 4),
+            "metadata": {
+                "name": row["name"],
+                "email": row["email"],
+                "location": row["location"],
+                "skills": row["skills"],
+                "total_years_experience": row["total_years_experience"],
+                "highest_education": row["highest_education"],
+            },
+            "document": row["embedding_text"],
+        }
+        for row in rows
+    ]
 
 
-def search_with_skills(
+async def search_with_skills(
     query_text: str,
     required_skills: list[str] | None = None,
     min_years: float | None = None,
     location: str | None = None,
     top_k: int = 10,
+    session: AsyncSession | None = None,
 ) -> list[dict]:
     """
-    Fetch more candidates than needed from ChromaDB, then filter in Python.
-    ChromaDB 1.5+ doesn't support substring matching on string metadata fields,
-    so skill/location filtering has to happen post-retrieval.
+    Fetch more candidates than needed from pgvector, then filter in Python.
+    Skill and location matching use case-insensitive substring checks that
+    are simpler to express in Python than in SQL for this schema.
     """
     fetch_k = min(top_k * 10, 100)
-
-    db_filters = None
-    if min_years is not None:
-        db_filters = {"total_years_experience": {"$gte": min_years}}
-
-    results = search(query_text, top_k=fetch_k, filters=db_filters)
+    results = await search(query_text, top_k=fetch_k, min_years=min_years, session=session)
 
     filtered = []
     for result in results:
@@ -150,13 +110,8 @@ def search_with_skills(
     return filtered
 
 
-def get_count() -> int:
-    return get_collection().count()
-
-
-def delete_all():
-    global _collection
-    if _client is not None:
-        _client.delete_collection(COLLECTION_NAME)
-        _collection = None
-        print(f"  Deleted collection '{COLLECTION_NAME}'")
+async def get_count() -> int:
+    sql = text("SELECT COUNT(*) FROM candidates WHERE embedding IS NOT NULL")
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(sql)
+        return result.scalar_one()
