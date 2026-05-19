@@ -5,22 +5,34 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from config.settings import config
-from config.schema import ResumeSchema, ResumeChunk
+from config.schema import ResumeSchema
 
 
 _model: SentenceTransformer | None = None
+
+# BGE models require this prefix on queries but NOT on documents.
+# Omitting it on queries silently degrades retrieval quality.
+_BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 
 def get_model() -> SentenceTransformer:
     global _model
     if _model is None:
         print("  Loading embedding model (first time only)...")
-        _model = SentenceTransformer("all-mpnet-base-v2")
+        _model = SentenceTransformer("BAAI/bge-base-en-v1.5")
         print("  Model loaded.")
     return _model
 
 
 def embed_text(text: str) -> list[float]:
+    """Encode a search query. Applies BGE query prefix."""
+    model = get_model()
+    embedding = model.encode(_BGE_QUERY_PREFIX + text, convert_to_numpy=True)
+    return embedding.tolist()
+
+
+def _encode_document(text: str) -> list[float]:
+    """Encode a resume document. No query prefix."""
     model = get_model()
     embedding = model.encode(text, convert_to_numpy=True)
     return embedding.tolist()
@@ -30,14 +42,13 @@ def embed_resume(resume: ResumeSchema) -> list[float]:
     text = resume.to_embedding_text()
 
     if not text.strip():
-        model = get_model()
-        dim = model.get_embedding_dimension()
-        return [0.0] * dim
+        return [0.0] * 768
 
-    return embed_text(text)
+    return _encode_document(text)
 
 
 def embed_chunks_batch(chunks: list[ResumeChunk]) -> list[list[float]]:
+    """Encode resume chunks as documents. No query prefix."""
     model = get_model()
     texts = [chunk.text for chunk in chunks]
     embeddings = model.encode(
@@ -50,6 +61,7 @@ def embed_chunks_batch(chunks: list[ResumeChunk]) -> list[list[float]]:
 
 
 def embed_resumes_batch(resumes: list[ResumeSchema]) -> list[list[float]]:
+    """Encode whole resumes as documents. No query prefix."""
     model = get_model()
 
     texts = []
