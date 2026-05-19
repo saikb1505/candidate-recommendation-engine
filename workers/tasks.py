@@ -9,10 +9,10 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.pool import NullPool
 
 from workers.celery_app import celery_app
-from db.models import Candidate, Company, JobPost, CandidateJobMatch
+from db.models import Candidate, CandidateChunk, Company, JobPost, CandidateJobMatch
 from storage.s3 import download_file, delete_file
 from ingestion.pipeline import process_single
-from embeddings.embedder import embed_resume
+from embeddings.embedder import embed_resume, embed_chunks_batch
 from recommendation.ranker import smart_match
 from config.settings import config
 
@@ -118,6 +118,18 @@ async def _ingest_resume(s3_key: str, candidate_id: str):
                 assert resume is not None
                 candidate.embedding = embed_resume(resume)
                 candidate.embedding_text = resume.to_embedding_text()
+
+                chunks = resume.to_chunks()
+                if chunks:
+                    chunk_embeddings = embed_chunks_batch(chunks)
+                    for chunk, emb in zip(chunks, chunk_embeddings):
+                        session.add(CandidateChunk(
+                            candidate_id=candidate.id,
+                            chunk_type=chunk.chunk_type,
+                            chunk_index=chunk.chunk_index,
+                            chunk_text=chunk.text,
+                            embedding=emb,
+                        ))
 
             try:
                 await session.commit()

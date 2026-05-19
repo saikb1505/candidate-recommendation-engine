@@ -12,7 +12,7 @@ from anthropic import AsyncAnthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import config
-from embeddings.vector_store import search, search_with_skills
+from embeddings.vector_store import search_by_chunks, search_with_skills_by_chunks
 
 
 @dataclass
@@ -50,7 +50,7 @@ async def fast_match(
     top_k: int = 10,
     session: AsyncSession | None = None,
 ) -> list[CandidateMatch]:
-    results = await search_with_skills(
+    results = await search_with_skills_by_chunks(
         query_text=query,
         required_skills=required_skills,
         min_years=min_years,
@@ -77,7 +77,7 @@ async def smart_match(
     print("  Searching candidates...")
     fetch_k = min(top_k * 3, 30)
 
-    results = await search_with_skills(
+    results = await search_with_skills_by_chunks(
         query_text=job_description,
         required_skills=requirements.get("skills"),
         min_years=requirements.get("min_years"),
@@ -88,7 +88,7 @@ async def smart_match(
 
     if not results:
         print("  No filtered results, trying without filters...")
-        results = await search(job_description, fetch_k, session=session)
+        results = await search_by_chunks(job_description, fetch_k, session=session)
 
     if not results:
         print("  No candidates found")
