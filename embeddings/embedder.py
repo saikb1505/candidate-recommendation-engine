@@ -5,7 +5,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from config.settings import config
-from config.schema import ResumeSchema
+from config.schema import ResumeSchema, ResumeChunk
 
 
 _model: SentenceTransformer | None = None
@@ -35,6 +35,18 @@ def embed_resume(resume: ResumeSchema) -> list[float]:
         return [0.0] * dim
 
     return embed_text(text)
+
+
+def embed_chunks_batch(chunks: list[ResumeChunk]) -> list[list[float]]:
+    model = get_model()
+    texts = [chunk.text for chunk in chunks]
+    embeddings = model.encode(
+        texts,
+        batch_size=32,
+        show_progress_bar=False,
+        convert_to_numpy=True,
+    )
+    return embeddings.tolist()
 
 
 def embed_resumes_batch(resumes: list[ResumeSchema]) -> list[list[float]]:

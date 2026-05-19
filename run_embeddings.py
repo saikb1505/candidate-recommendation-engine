@@ -16,9 +16,9 @@ from sqlalchemy import select, text
 
 from config.schema import ResumeSchema
 from db.session import AsyncSessionLocal
-from db.models import Candidate
-from embeddings.embedder import embed_resume
-from embeddings.vector_store import search, search_with_skills, get_count
+from db.models import Candidate, CandidateChunk
+from embeddings.embedder import embed_resume, embed_chunks_batch
+from embeddings.vector_store import search, search_with_skills, get_count, search_by_chunks, get_chunk_count
 
 
 async def backfill_embeddings():
@@ -62,6 +62,55 @@ async def backfill_embeddings():
     return updated
 
 
+async def backfill_chunks():
+    """Create chunk embeddings for processed candidates that have none yet."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Candidate).where(
+                Candidate.status == "processed",
+                ~Candidate.id.in_(
+                    select(CandidateChunk.candidate_id).distinct()
+                ),
+            )
+        )
+        candidates = result.scalars().all()
+
+    if not candidates:
+        print("  All processed candidates already have chunks.")
+        return 0
+
+    print(f"  Creating chunks for {len(candidates)} candidates...")
+
+    updated = 0
+    for candidate in candidates:
+        if not candidate.raw_data:
+            continue
+        try:
+            resume = ResumeSchema(**candidate.raw_data)
+            chunks = resume.to_chunks()
+            if not chunks:
+                continue
+
+            chunk_embeddings = embed_chunks_batch(chunks)
+
+            async with AsyncSessionLocal() as session:
+                for chunk, emb in zip(chunks, chunk_embeddings):
+                    session.add(CandidateChunk(
+                        candidate_id=candidate.id,
+                        chunk_type=chunk.chunk_type,
+                        chunk_index=chunk.chunk_index,
+                        chunk_text=chunk.text,
+                        embedding=emb,
+                    ))
+                await session.commit()
+
+            updated += 1
+        except Exception as e:
+            print(f"  Failed to create chunks for {candidate.id}: {e}")
+
+    return updated
+
+
 async def run_sample_searches():
     queries = [
         "Python backend developer with API experience",
@@ -71,7 +120,7 @@ async def run_sample_searches():
 
     for query in queries:
         print(f'  Query: "{query}"')
-        results = await search(query, top_k=3)
+        results = await search_by_chunks(query, top_k=3)
 
         if results:
             for rank, result in enumerate(results, 1):
@@ -91,7 +140,7 @@ async def main():
     print("=" * 50)
     print()
 
-    print("[Step 1] Backfilling missing embeddings...")
+    print("[Step 1] Backfilling missing whole-resume embeddings...")
     updated = await backfill_embeddings()
     if updated:
         print(f"  Backfilled {updated} candidates.")
@@ -99,12 +148,21 @@ async def main():
     count = await get_count()
     print(f"  Total candidates with embeddings: {count}")
 
-    if count == 0:
+    print()
+    print("[Step 2] Backfilling missing chunk embeddings...")
+    chunk_updated = await backfill_chunks()
+    if chunk_updated:
+        print(f"  Created chunks for {chunk_updated} candidates.")
+
+    chunk_count = await get_chunk_count()
+    print(f"  Total candidates with chunks: {chunk_count}")
+
+    if count == 0 and chunk_count == 0:
         print("\n  No embeddings found — ingest some resumes first.")
         return
 
     print()
-    print("[Step 2] Sample searches...")
+    print("[Step 3] Sample searches (chunk-based)...")
     print()
     await run_sample_searches()
 
