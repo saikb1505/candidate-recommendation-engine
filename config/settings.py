@@ -37,6 +37,11 @@ class AppConfig(BaseSettings):
     # --- Redis / Celery ---
     redis_url: str = "redis://localhost:6379/0"
 
+    # --- Qdrant ---
+    qdrant_url: str = ""
+    qdrant_api_key: str = ""
+    qdrant_collection: str = "resume_chunks"
+
     # --- Storage ---
     storage_backend: str = "local"          # "local" or "s3"
     local_upload_dir: Path = Path("data/uploads")

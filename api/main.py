@@ -16,12 +16,14 @@ from db.models import Base, Candidate, JobPost, CandidateJobMatch
 from storage.s3 import upload_file
 from workers.tasks import ingest_resume, process_job_post
 from workers.celery_app import celery_app
+from embeddings.vector_store import setup_collection
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await setup_collection()
     yield
 
 

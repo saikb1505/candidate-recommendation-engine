@@ -49,28 +49,6 @@ class ResumeSchema(BaseModel):
     source_file: str = ""
     extraction_method: str = ""
 
-    def to_embedding_text(self) -> str:
-        parts = []
-
-        if self.summary:
-            parts.append(self.summary)
-
-        for exp in self.experience:
-            exp_text = f"{exp.title} at {exp.company}"
-            if exp.duration:
-                exp_text += f" ({exp.duration})"
-            if exp.description:
-                exp_text += f". {exp.description}"
-            parts.append(exp_text)
-
-        for edu in self.education:
-            edu_text = f"{edu.degree} from {edu.institution}"
-            if edu.year:
-                edu_text += f" ({edu.year})"
-            parts.append(edu_text)
-
-        return ". ".join(parts)
-
     def to_chunks(self) -> list[ResumeChunk]:
         chunks: list[ResumeChunk] = []
 
@@ -103,14 +81,3 @@ class ResumeSchema(BaseModel):
             chunks.append(ResumeChunk("education", 0, ". ".join(edu_parts)))
 
         return chunks
-
-    def to_metadata(self) -> dict:
-        return {
-            "name": self.contact.name,
-            "email": self.contact.email,
-            "location": self.contact.location,
-            "skills": ", ".join(self.skills),
-            "total_years_experience": self.total_years_experience,
-            "highest_education": self.highest_education,
-            "source_file": self.source_file,
-        }

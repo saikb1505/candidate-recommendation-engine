@@ -9,38 +9,27 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.pool import NullPool
 
 from workers.celery_app import celery_app
-from db.models import Candidate, CandidateChunk, Company, JobPost, CandidateJobMatch
+from db.models import Candidate, Company, JobPost, CandidateJobMatch
 from storage.s3 import download_file, delete_file
 from ingestion.pipeline import process_single
-from embeddings.embedder import embed_resume, embed_chunks_batch
+from embeddings.embedder import embed_chunks_batch
+from embeddings.vector_store import make_qdrant_client, upsert_chunks
 from recommendation.ranker import smart_match
 from config.settings import config
 
 
-
 def _make_session():
-    """
-    Create a fresh engine + session factory per task call.
-
-    NullPool disables connection pooling so there is no state
-    tied to a previous event loop. Each asyncio.run() call gets
-    its own engine, which is disposed before the coroutine returns.
-    """
+    # NullPool prevents connection state leaking across asyncio.run() calls.
     engine = create_async_engine(config.database_url, poolclass=NullPool)
     return async_sessionmaker(engine, expire_on_commit=False), engine
 
-
-# ──────────────────────────────────────────────
-#  FLOW 1: Ingest a resume from S3
-# ──────────────────────────────────────────────
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def ingest_resume(self, s3_key: str, candidate_id: str):
     try:
         asyncio.run(_ingest_resume(s3_key, candidate_id))
     except IntegrityError:
-        # Duplicate email is permanent — retrying will never resolve it.
-        # The inner handler already deleted the row and S3 file.
+        # Duplicate email — permanent failure, no point retrying.
         pass
     except Exception as exc:
         raise self.retry(exc=exc)
@@ -76,11 +65,13 @@ async def _ingest_resume(s3_key: str, candidate_id: str):
                 print(f"[ingest_resume] candidate {candidate_id} not found in DB")
                 return
 
+            chunks = []
+            chunk_embeddings = []
+
             if error:
                 print(f"[ingest_resume] extraction failed: {error}")
                 candidate.status = "failed"
             else:
-                # Check for any existing candidate with this email (any status)
                 if resume.contact.email:
                     dup_result = await session.execute(
                         select(Candidate).where(
@@ -115,28 +106,37 @@ async def _ingest_resume(s3_key: str, candidate_id: str):
                     if not existing_company:
                         session.add(Company(name=company_name, source="Resume"))
 
-                assert resume is not None
-                candidate.embedding = embed_resume(resume)
-                candidate.embedding_text = resume.to_embedding_text()
-
                 chunks = resume.to_chunks()
-                if chunks:
-                    chunk_embeddings = embed_chunks_batch(chunks)
-                    for chunk, emb in zip(chunks, chunk_embeddings):
-                        session.add(CandidateChunk(
-                            candidate_id=candidate.id,
-                            chunk_type=chunk.chunk_type,
-                            chunk_index=chunk.chunk_index,
-                            chunk_text=chunk.text,
-                            embedding=emb,
-                        ))
+                chunk_embeddings = embed_chunks_batch(chunks) if chunks else []
 
             try:
                 await session.commit()
                 print(f"[ingest_resume] committed candidate {candidate_id} status={candidate.status}")
+
+                # Fresh Qdrant client per task — each asyncio.run() has its own event loop.
+                if not error and chunks and chunk_embeddings:
+                    qdrant = make_qdrant_client()
+                    try:
+                        await upsert_chunks(
+                            candidate_id=candidate_id,
+                            chunks=chunks,
+                            embeddings=chunk_embeddings,
+                            payload_meta={
+                                "name":                   candidate.name,
+                                "email":                  candidate.email,
+                                "location":               candidate.location,
+                                "skills":                 candidate.skills or [],
+                                "total_years_experience": candidate.total_years_experience,
+                                "highest_education":      candidate.highest_education,
+                                "status":                 "processed",
+                            },
+                            client=qdrant,
+                        )
+                        print(f"[ingest_resume] upserted {len(chunks)} chunks to Qdrant for {candidate_id}")
+                    finally:
+                        await qdrant.close()
             except IntegrityError:
-                # Race condition: another worker committed the same email just before us.
-                # Discard the broken session and use a fresh one to mark as duplicate.
+                # Race: another worker committed the same email first — delete this one.
                 await session.rollback()
                 async with Session() as session2:
                     result2 = await session2.execute(
@@ -147,16 +147,12 @@ async def _ingest_resume(s3_key: str, candidate_id: str):
                         await session2.delete(candidate2)
                         await session2.commit()
                 delete_file(s3_key)
-                print(f"[ingest_resume] race-condition duplicate for {candidate_id}, deleted row and S3 file")
+                print(f"[ingest_resume] race-condition duplicate for {candidate_id}, deleted")
     finally:
         if tmp_path:
             Path(tmp_path).unlink(missing_ok=True)
         await engine.dispose()
 
-
-# ──────────────────────────────────────────────
-#  FLOW 2: Match candidates to a job post
-# ──────────────────────────────────────────────
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def process_job_post(self, job_post_id: str):
@@ -168,6 +164,7 @@ def process_job_post(self, job_post_id: str):
 
 async def _process_job_post(job_post_id: str):
     Session, engine = _make_session()
+    qdrant = make_qdrant_client()
 
     try:
         async with Session() as session:
@@ -179,7 +176,7 @@ async def _process_job_post(job_post_id: str):
                 print(f"[process_job_post] job_post {job_post_id} not found in DB")
                 return
 
-            matches = await smart_match(job_description=job_post.description, top_k=20, session=session)
+            matches = await smart_match(job_description=job_post.description, top_k=20, client=qdrant)
 
             for match in matches:
                 score = min(100, round(match.similarity_score * 100))
@@ -215,4 +212,5 @@ async def _process_job_post(job_post_id: str):
             await session.commit()
             print(f"[process_job_post] committed {len(matches)} matches for job {job_post_id}")
     finally:
+        await qdrant.close()
         await engine.dispose()

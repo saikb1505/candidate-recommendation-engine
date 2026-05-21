@@ -1,188 +1,177 @@
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+import uuid
 
-from db.session import AsyncSessionLocal
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchText,
+    MatchValue,
+    PayloadSchemaType,
+    PointStruct,
+    Range,
+    VectorParams,
+)
+
+from config.settings import config
+from config.schema import ResumeChunk
 from embeddings.embedder import embed_text
 
-EMBEDDING_DIM = 768
+_client: AsyncQdrantClient | None = None
 
 
-def _to_pg_vector(embedding: list[float]) -> str:
-    """Format a float list as a Postgres vector literal."""
-    return "[" + ",".join(str(v) for v in embedding) + "]"
+def get_qdrant() -> AsyncQdrantClient:
+    global _client
+    if _client is None:
+        _client = AsyncQdrantClient(
+            url=config.qdrant_url,
+            api_key=config.qdrant_api_key or None,
+        )
+    return _client
 
 
-async def search(
-    query_text: str,
-    top_k: int = 10,
-    min_years: float | None = None,
-    session: AsyncSession | None = None,
-) -> list[dict]:
-    query_embedding = embed_text(query_text)
-    vec_str = _to_pg_vector(query_embedding)
+def make_qdrant_client() -> AsyncQdrantClient:
+    """Create a fresh client per Celery task (each task runs its own event loop)."""
+    return AsyncQdrantClient(
+        url=config.qdrant_url,
+        api_key=config.qdrant_api_key or None,
+    )
 
-    where_clause = "WHERE embedding IS NOT NULL AND status = 'processed'"
-    params: dict = {"top_k": top_k, "vec": vec_str}
 
-    if min_years is not None:
-        where_clause += " AND total_years_experience >= :min_years"
-        params["min_years"] = min_years
+async def setup_collection() -> None:
+    """Create the collection and payload indexes if they don't exist yet."""
+    client = get_qdrant()
 
-    sql = text(f"""
-        SELECT
-            id::text,
-            name,
-            email,
-            location,
-            array_to_string(skills, ', ') AS skills,
-            total_years_experience,
-            highest_education,
-            embedding_text,
-            1 - (embedding <=> CAST(:vec AS vector)) AS score
-        FROM candidates
-        {where_clause}
-        ORDER BY embedding <=> CAST(:vec AS vector)
-        LIMIT :top_k
-    """)
+    if await client.collection_exists(config.qdrant_collection):
+        return
 
-    async def _execute(s: AsyncSession) -> list:
-        return (await s.execute(sql, params)).mappings().all()
+    await client.create_collection(
+        collection_name=config.qdrant_collection,
+        vectors_config=VectorParams(size=768, distance=Distance.COSINE),
+    )
 
-    if session is not None:
-        rows = await _execute(session)
-    else:
-        async with AsyncSessionLocal() as s:
-            rows = await _execute(s)
+    indexes = {
+        "candidate_id":           PayloadSchemaType.KEYWORD,
+        "skills":                 PayloadSchemaType.KEYWORD,
+        "status":                 PayloadSchemaType.KEYWORD,
+        "location":               PayloadSchemaType.KEYWORD,
+        "total_years_experience": PayloadSchemaType.FLOAT,
+    }
+    for field, schema in indexes.items():
+        await client.create_payload_index(config.qdrant_collection, field, schema)
 
-    return [
-        {
-            "id": row["id"],
-            "score": round(float(row["score"]), 4),
-            "metadata": {
-                "name": row["name"],
-                "email": row["email"],
-                "location": row["location"],
-                "skills": row["skills"],
-                "total_years_experience": row["total_years_experience"],
-                "highest_education": row["highest_education"],
+    print(f"  Qdrant collection '{config.qdrant_collection}' created with indexes.")
+
+
+def _chunk_point_id(candidate_id: str, chunk_type: str, chunk_index: int) -> str:
+    """Deterministic UUID per chunk — makes upserts idempotent."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{candidate_id}:{chunk_type}:{chunk_index}"))
+
+
+async def upsert_chunks(
+    candidate_id: str,
+    chunks: list[ResumeChunk],
+    embeddings: list[list[float]],
+    payload_meta: dict,
+    client: AsyncQdrantClient | None = None,
+) -> None:
+    """
+    Write chunk vectors to Qdrant. Idempotent — safe to call multiple times
+    for the same candidate thanks to deterministic point IDs.
+
+    payload_meta keys: name, email, location, skills (list), total_years_experience,
+                       highest_education, status.
+    """
+    cl = client or get_qdrant()
+
+    points = [
+        PointStruct(
+            id=_chunk_point_id(candidate_id, chunk.chunk_type, chunk.chunk_index),
+            vector=embedding,
+            payload={
+                "candidate_id": candidate_id,
+                "chunk_type":   chunk.chunk_type,
+                "chunk_index":  chunk.chunk_index,
+                "chunk_text":   chunk.text,
+                # Candidate-level metadata denormalised into every chunk so
+                # Qdrant can filter without joining back to Postgres.
+                "name":                    payload_meta.get("name", ""),
+                "email":                   payload_meta.get("email", ""),
+                "location":                payload_meta.get("location", ""),
+                "skills":                  [s.lower() for s in payload_meta.get("skills", [])],
+                "total_years_experience":  payload_meta.get("total_years_experience", 0.0),
+                "highest_education":       payload_meta.get("highest_education", ""),
+                "status":                  payload_meta.get("status", "processed"),
             },
-            "document": row["embedding_text"],
-        }
-        for row in rows
+        )
+        for chunk, embedding in zip(chunks, embeddings)
     ]
 
+    await cl.upsert(collection_name=config.qdrant_collection, points=points)
 
-async def search_with_skills(
-    query_text: str,
-    required_skills: list[str] | None = None,
-    min_years: float | None = None,
-    location: str | None = None,
-    top_k: int = 10,
-    session: AsyncSession | None = None,
-) -> list[dict]:
-    """
-    Fetch more candidates than needed from pgvector, then filter in Python.
-    Skill and location matching use case-insensitive substring checks that
-    are simpler to express in Python than in SQL for this schema.
-    """
-    fetch_k = min(top_k * 10, 100)
-    results = await search(query_text, top_k=fetch_k, min_years=min_years, session=session)
 
-    filtered = []
-    for result in results:
-        metadata = result["metadata"]
+async def delete_candidate_chunks(
+    candidate_id: str,
+    client: AsyncQdrantClient | None = None,
+) -> None:
+    """Delete all chunks for a candidate — used when re-ingesting."""
+    cl = client or get_qdrant()
+    await cl.delete(
+        collection_name=config.qdrant_collection,
+        points_selector=Filter(
+            must=[FieldCondition(key="candidate_id", match=MatchValue(value=candidate_id))]
+        ),
+    )
 
-        if required_skills:
-            resume_skills = metadata.get("skills", "").lower()
-            if not all(skill.lower() in resume_skills for skill in required_skills):
-                continue
 
-        if location:
-            resume_location = metadata.get("location", "").lower()
-            if location.lower() not in resume_location:
-                continue
-
-        filtered.append(result)
-
-        if len(filtered) >= top_k:
-            break
-
-    return filtered
+def _hit_to_dict(hit) -> dict:
+    p = hit.payload or {}
+    return {
+        "id":    p.get("candidate_id", ""),
+        "score": round(float(hit.score), 4),
+        "metadata": {
+            "name":                   p.get("name", ""),
+            "email":                  p.get("email", ""),
+            "location":               p.get("location", ""),
+            "skills":                 ", ".join(p.get("skills", [])),
+            "total_years_experience": p.get("total_years_experience", 0.0),
+            "highest_education":      p.get("highest_education", ""),
+        },
+        "document": p.get("chunk_text", ""),
+    }
 
 
 async def search_by_chunks(
     query_text: str,
     top_k: int = 10,
     min_years: float | None = None,
-    session: AsyncSession | None = None,
+    session=None,  # unused — kept so callers don't need updating
+    client: AsyncQdrantClient | None = None,
 ) -> list[dict]:
     """
-    Search using per-field chunk embeddings. Scores each candidate by the
-    MAX similarity across all its chunks, then returns top_k candidates.
-    This resolves the 384-token truncation problem and gives better semantic
-    granularity than a single whole-resume embedding.
+    Search by dense vector similarity. Returns the best-matching chunk per
+    candidate (MAX score via group_by), so each candidate appears once.
     """
     query_embedding = embed_text(query_text)
-    vec_str = _to_pg_vector(query_embedding)
+    client = client or get_qdrant()
 
-    where_clause = "WHERE c.status = 'processed'"
-    params: dict = {"top_k": top_k, "vec": vec_str}
-
+    conditions = [FieldCondition(key="status", match=MatchValue(value="processed"))]
     if min_years is not None:
-        where_clause += " AND c.total_years_experience >= :min_years"
-        params["min_years"] = min_years
-
-    sql = text(f"""
-        WITH chunk_scores AS (
-            SELECT
-                cc.candidate_id,
-                MAX(1 - (cc.embedding <=> CAST(:vec AS vector))) AS score
-            FROM candidate_chunks cc
-            WHERE cc.embedding IS NOT NULL
-            GROUP BY cc.candidate_id
+        conditions.append(
+            FieldCondition(key="total_years_experience", range=Range(gte=min_years))
         )
-        SELECT
-            c.id::text,
-            c.name,
-            c.email,
-            c.location,
-            array_to_string(c.skills, ', ') AS skills,
-            c.total_years_experience,
-            c.highest_education,
-            c.embedding_text,
-            cs.score
-        FROM chunk_scores cs
-        JOIN candidates c ON c.id = cs.candidate_id
-        {where_clause}
-        ORDER BY cs.score DESC
-        LIMIT :top_k
-    """)
 
-    async def _execute(s: AsyncSession) -> list:
-        return (await s.execute(sql, params)).mappings().all()
+    result = await client.query_points_groups(
+        collection_name=config.qdrant_collection,
+        query=query_embedding,
+        group_by="candidate_id",
+        limit=top_k,
+        group_size=1,
+        query_filter=Filter(must=conditions),
+        with_payload=True,
+    )
 
-    if session is not None:
-        rows = await _execute(session)
-    else:
-        async with AsyncSessionLocal() as s:
-            rows = await _execute(s)
-
-    return [
-        {
-            "id": row["id"],
-            "score": round(float(row["score"]), 4),
-            "metadata": {
-                "name": row["name"],
-                "email": row["email"],
-                "location": row["location"],
-                "skills": row["skills"],
-                "total_years_experience": row["total_years_experience"],
-                "highest_education": row["highest_education"],
-            },
-            "document": row["embedding_text"],
-        }
-        for row in rows
-    ]
+    return [_hit_to_dict(group.hits[0]) for group in result.groups if group.hits]
 
 
 async def search_with_skills_by_chunks(
@@ -191,42 +180,52 @@ async def search_with_skills_by_chunks(
     min_years: float | None = None,
     location: str | None = None,
     top_k: int = 10,
-    session: AsyncSession | None = None,
+    session=None,  # unused — kept so callers don't need updating
+    client: AsyncQdrantClient | None = None,
 ) -> list[dict]:
-    fetch_k = min(top_k * 10, 100)
-    results = await search_by_chunks(query_text, top_k=fetch_k, min_years=min_years, session=session)
+    """
+    Vector search with native Qdrant payload filtering.
+    Filters are applied during HNSW traversal — no Python post-filtering,
+    no over-fetching, no missed candidates.
 
-    filtered = []
-    for result in results:
-        metadata = result["metadata"]
+    Skills use AND logic: candidate must have ALL required skills.
+    Skills are stored lowercase; query skills are lowercased before matching.
+    """
+    query_embedding = embed_text(query_text)
+    client = client or get_qdrant()
 
-        if required_skills:
-            resume_skills = metadata.get("skills", "").lower()
-            if not all(skill.lower() in resume_skills for skill in required_skills):
-                continue
+    conditions = [FieldCondition(key="status", match=MatchValue(value="processed"))]
 
-        if location:
-            resume_location = metadata.get("location", "").lower()
-            if location.lower() not in resume_location:
-                continue
+    if min_years is not None:
+        conditions.append(
+            FieldCondition(key="total_years_experience", range=Range(gte=min_years))
+        )
 
-        filtered.append(result)
+    if required_skills:
+        for skill in required_skills:
+            conditions.append(
+                FieldCondition(key="skills", match=MatchValue(value=skill.lower()))
+            )
 
-        if len(filtered) >= top_k:
-            break
+    if location:
+        conditions.append(
+            FieldCondition(key="location", match=MatchText(text=location))
+        )
 
-    return filtered
+    result = await client.query_points_groups(
+        collection_name=config.qdrant_collection,
+        query=query_embedding,
+        group_by="candidate_id",
+        limit=top_k,
+        group_size=1,
+        query_filter=Filter(must=conditions),
+        with_payload=True,
+    )
 
-
-async def get_count() -> int:
-    sql = text("SELECT COUNT(*) FROM candidates WHERE embedding IS NOT NULL")
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(sql)
-        return result.scalar_one()
+    return [_hit_to_dict(group.hits[0]) for group in result.groups if group.hits]
 
 
 async def get_chunk_count() -> int:
-    sql = text("SELECT COUNT(DISTINCT candidate_id) FROM candidate_chunks WHERE embedding IS NOT NULL")
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(sql)
-        return result.scalar_one()
+    client = get_qdrant()
+    result = await client.count(collection_name=config.qdrant_collection, exact=False)
+    return result.count

@@ -8,7 +8,7 @@ Tests both fast_match (free, instant) and smart_match
 (LLM-powered, ~$0.01 per search) with sample job descriptions.
 
 Prerequisites:
-    - Embeddings stored in pgvector (run run_embeddings.py first)
+    - Chunk vectors in Qdrant (run run_embeddings.py first)
     - ANTHROPIC_API_KEY set (for smart_match only)
 """
 
@@ -87,11 +87,8 @@ async def main():
     print("  Done! Your recommendation engine is working.")
     print("=" * 50)
     print()
-    print("  What you just saw:")
-    print("    fast_match  → instant, free, uses vector search")
-    print("    smart_match → 2-3 seconds, ~$0.01, LLM re-ranks results")
-    print()
-    print("  Next step: wrap this in FastAPI endpoints")
+    print("  fast_match  → instant, free, Qdrant vector search + native filters")
+    print("  smart_match → 2-3 seconds, ~$0.01, LLM re-ranks results")
 
 
 if __name__ == "__main__":

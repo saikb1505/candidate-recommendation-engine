@@ -9,7 +9,7 @@ import json
 from dataclasses import dataclass
 
 from anthropic import AsyncAnthropic
-from sqlalchemy.ext.asyncio import AsyncSession
+from qdrant_client import AsyncQdrantClient
 
 from config.settings import config
 from embeddings.vector_store import search_by_chunks, search_with_skills_by_chunks
@@ -48,7 +48,7 @@ async def fast_match(
     min_years: float | None = None,
     location: str | None = None,
     top_k: int = 10,
-    session: AsyncSession | None = None,
+    client: AsyncQdrantClient | None = None,
 ) -> list[CandidateMatch]:
     results = await search_with_skills_by_chunks(
         query_text=query,
@@ -56,7 +56,7 @@ async def fast_match(
         min_years=min_years,
         location=location,
         top_k=top_k,
-        session=session,
+        client=client,
     )
 
     return _format_results(results)
@@ -65,7 +65,7 @@ async def fast_match(
 async def smart_match(
     job_description: str,
     top_k: int = 10,
-    session: AsyncSession | None = None,
+    client: AsyncQdrantClient | None = None,
 ) -> list[CandidateMatch]:
     print("  Parsing job description...")
     requirements = await _parse_job_description(job_description)
@@ -83,12 +83,12 @@ async def smart_match(
         min_years=requirements.get("min_years"),
         location=requirements.get("location"),
         top_k=fetch_k,
-        session=session,
+        client=client,
     )
 
     if not results:
         print("  No filtered results, trying without filters...")
-        results = await search_by_chunks(job_description, fetch_k, session=session)
+        results = await search_by_chunks(job_description, fetch_k, client=client)
 
     if not results:
         print("  No candidates found")
