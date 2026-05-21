@@ -20,9 +20,9 @@ from extraction.llm_extractor import extract_resume_with_retry
 from extraction.validator import validate_resume
 
 
-async def process_single(file_path: str, file_type: str) -> tuple[ResumeSchema | None, str]:
+def process_single(file_path: str, file_type: str) -> tuple[ResumeSchema | None, str]:
     filename = Path(file_path).name
-    raw_data = await extract_resume_with_retry(file_path, file_type)
+    raw_data = extract_resume_with_retry(file_path, file_type)
     resume, error = validate_resume(raw_data, source_file=filename)
     return resume, error
 
@@ -87,7 +87,7 @@ async def process_batch(
         filename = Path(record.path).name
         print(f"  [{i+1}/{len(pending)}] Processing: {filename}")
 
-        resume, error = await process_single(record.path, record.file_type)
+        resume, error = process_single(record.path, record.file_type)
 
         if error:
             record.status = ProcessingStatus.FAILED
@@ -142,13 +142,14 @@ async def process_batch_concurrent(
     async def _process_one(record: FileRecord) -> dict:
         async with semaphore:
             filename = Path(record.path).name
-            resume, error = await process_single(record.path, record.file_type)
+            resume, error = await asyncio.to_thread(process_single, record.path, record.file_type)
 
             if error:
                 record.status = ProcessingStatus.FAILED
                 record.error_message = error
                 return {"file": filename, "success": False, "error": error}
             else:
+                assert resume is not None
                 _save_json(resume, filename)
                 record.status = ProcessingStatus.JSON_EXTRACTED
                 return {

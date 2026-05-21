@@ -48,6 +48,10 @@ class AppConfig(BaseSettings):
     s3_bucket: str = "resume-matcher-files"
     aws_region: str = "us-east-1"
 
+    @property
+    def sync_database_url(self) -> str:
+        return self.database_url.replace("+asyncpg", "")
+
     def ensure_dirs(self):
         for d in [self.output_dir, self.json_dir, self.failed_dir, self.local_upload_dir]:
             d.mkdir(parents=True, exist_ok=True)

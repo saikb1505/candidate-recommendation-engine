@@ -8,8 +8,8 @@ smart_match: vector search + LLM re-ranking with explanations (~$0.01)
 import json
 from dataclasses import dataclass
 
-from anthropic import AsyncAnthropic
-from qdrant_client import AsyncQdrantClient
+from anthropic import Anthropic
+from qdrant_client import QdrantClient
 
 from config.settings import config
 from embeddings.vector_store import search_by_chunks, search_with_skills_by_chunks
@@ -42,15 +42,15 @@ class CandidateMatch:
         }
 
 
-async def fast_match(
+def fast_match(
     query: str,
     required_skills: list[str] | None = None,
     min_years: float | None = None,
     location: str | None = None,
     top_k: int = 10,
-    client: AsyncQdrantClient | None = None,
+    client: QdrantClient | None = None,
 ) -> list[CandidateMatch]:
-    results = await search_with_skills_by_chunks(
+    results = search_with_skills_by_chunks(
         query_text=query,
         required_skills=required_skills,
         min_years=min_years,
@@ -62,13 +62,13 @@ async def fast_match(
     return _format_results(results)
 
 
-async def smart_match(
+def smart_match(
     job_description: str,
     top_k: int = 10,
-    client: AsyncQdrantClient | None = None,
+    client: QdrantClient | None = None,
 ) -> list[CandidateMatch]:
     print("  Parsing job description...")
-    requirements = await _parse_job_description(job_description)
+    requirements = _parse_job_description(job_description)
 
     print(f"    Skills: {requirements.get('skills', [])}")
     print(f"    Min years: {requirements.get('min_years', 'any')}")
@@ -77,7 +77,7 @@ async def smart_match(
     print("  Searching candidates...")
     fetch_k = min(top_k * 3, 30)
 
-    results = await search_with_skills_by_chunks(
+    results = search_with_skills_by_chunks(
         query_text=job_description,
         required_skills=requirements.get("skills"),
         min_years=requirements.get("min_years"),
@@ -88,7 +88,7 @@ async def smart_match(
 
     if not results:
         print("  No filtered results, trying without filters...")
-        results = await search_by_chunks(job_description, fetch_k, client=client)
+        results = search_by_chunks(job_description, fetch_k, client=client)
 
     if not results:
         print("  No candidates found")
@@ -96,7 +96,7 @@ async def smart_match(
 
     print(f"  Re-ranking top {len(results)} candidates with LLM...")
     candidates = _format_results(results)
-    ranked = await _rerank_with_llm(job_description, candidates, top_k)
+    ranked = _rerank_with_llm(job_description, candidates, top_k)
 
     return ranked
 
@@ -122,11 +122,11 @@ RULES:
 Return ONLY the JSON. No markdown, no explanation."""
 
 
-async def _parse_job_description(jd_text: str) -> dict:
-    client = AsyncAnthropic()
+def _parse_job_description(jd_text: str) -> dict:
+    client = Anthropic()
 
     try:
-        response = await client.messages.create(
+        response = client.messages.create(
             model=config.llm_model,
             max_tokens=500,
             system=JD_PARSE_PROMPT,
@@ -177,12 +177,12 @@ Sort by match_score descending (best match first).
 Return ONLY the JSON array. No markdown, no explanation."""
 
 
-async def _rerank_with_llm(
+def _rerank_with_llm(
     job_description: str,
     candidates: list[CandidateMatch],
     top_k: int,
 ) -> list[CandidateMatch]:
-    client = AsyncAnthropic()
+    client = Anthropic()
 
     candidate_info = []
     for c in candidates:
@@ -203,7 +203,7 @@ CANDIDATES:
 Rank these candidates by match quality. Return top {top_k}."""
 
     try:
-        response = await client.messages.create(
+        response = client.messages.create(
             model=config.llm_model,
             max_tokens=2000,
             system=RERANK_PROMPT,

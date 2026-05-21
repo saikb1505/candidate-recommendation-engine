@@ -1,6 +1,6 @@
 import uuid
 
-from qdrant_client import AsyncQdrantClient
+from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
     FieldCondition,
@@ -17,35 +17,35 @@ from config.settings import config
 from config.schema import ResumeChunk
 from embeddings.embedder import embed_text
 
-_client: AsyncQdrantClient | None = None
+_client: QdrantClient | None = None
 
 
-def get_qdrant() -> AsyncQdrantClient:
+def get_qdrant() -> QdrantClient:
     global _client
     if _client is None:
-        _client = AsyncQdrantClient(
+        _client = QdrantClient(
             url=config.qdrant_url,
             api_key=config.qdrant_api_key or None,
         )
     return _client
 
 
-def make_qdrant_client() -> AsyncQdrantClient:
-    """Create a fresh client per Celery task (each task runs its own event loop)."""
-    return AsyncQdrantClient(
+def make_qdrant_client() -> QdrantClient:
+    """Create a fresh client — used by Celery tasks to avoid sharing state across workers."""
+    return QdrantClient(
         url=config.qdrant_url,
         api_key=config.qdrant_api_key or None,
     )
 
 
-async def setup_collection() -> None:
+def setup_collection() -> None:
     """Create the collection and payload indexes if they don't exist yet."""
     client = get_qdrant()
 
-    if await client.collection_exists(config.qdrant_collection):
+    if client.collection_exists(config.qdrant_collection):
         return
 
-    await client.create_collection(
+    client.create_collection(
         collection_name=config.qdrant_collection,
         vectors_config=VectorParams(size=768, distance=Distance.COSINE),
     )
@@ -58,7 +58,7 @@ async def setup_collection() -> None:
         "total_years_experience": PayloadSchemaType.FLOAT,
     }
     for field, schema in indexes.items():
-        await client.create_payload_index(config.qdrant_collection, field, schema)
+        client.create_payload_index(config.qdrant_collection, field, schema)
 
     print(f"  Qdrant collection '{config.qdrant_collection}' created with indexes.")
 
@@ -68,20 +68,13 @@ def _chunk_point_id(candidate_id: str, chunk_type: str, chunk_index: int) -> str
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{candidate_id}:{chunk_type}:{chunk_index}"))
 
 
-async def upsert_chunks(
+def upsert_chunks(
     candidate_id: str,
     chunks: list[ResumeChunk],
     embeddings: list[list[float]],
     payload_meta: dict,
-    client: AsyncQdrantClient | None = None,
+    client: QdrantClient | None = None,
 ) -> None:
-    """
-    Write chunk vectors to Qdrant. Idempotent — safe to call multiple times
-    for the same candidate thanks to deterministic point IDs.
-
-    payload_meta keys: name, email, location, skills (list), total_years_experience,
-                       highest_education, status.
-    """
     cl = client or get_qdrant()
 
     points = [
@@ -93,8 +86,6 @@ async def upsert_chunks(
                 "chunk_type":   chunk.chunk_type,
                 "chunk_index":  chunk.chunk_index,
                 "chunk_text":   chunk.text,
-                # Candidate-level metadata denormalised into every chunk so
-                # Qdrant can filter without joining back to Postgres.
                 "name":                    payload_meta.get("name", ""),
                 "email":                   payload_meta.get("email", ""),
                 "location":                payload_meta.get("location", ""),
@@ -107,16 +98,16 @@ async def upsert_chunks(
         for chunk, embedding in zip(chunks, embeddings)
     ]
 
-    await cl.upsert(collection_name=config.qdrant_collection, points=points)
+    cl.upsert(collection_name=config.qdrant_collection, points=points)
 
 
-async def delete_candidate_chunks(
+def delete_candidate_chunks(
     candidate_id: str,
-    client: AsyncQdrantClient | None = None,
+    client: QdrantClient | None = None,
 ) -> None:
     """Delete all chunks for a candidate — used when re-ingesting."""
     cl = client or get_qdrant()
-    await cl.delete(
+    cl.delete(
         collection_name=config.qdrant_collection,
         points_selector=Filter(
             must=[FieldCondition(key="candidate_id", match=MatchValue(value=candidate_id))]
@@ -141,19 +132,14 @@ def _hit_to_dict(hit) -> dict:
     }
 
 
-async def search_by_chunks(
+def search_by_chunks(
     query_text: str,
     top_k: int = 10,
     min_years: float | None = None,
-    session=None,  # unused — kept so callers don't need updating
-    client: AsyncQdrantClient | None = None,
+    client: QdrantClient | None = None,
 ) -> list[dict]:
-    """
-    Search by dense vector similarity. Returns the best-matching chunk per
-    candidate (MAX score via group_by), so each candidate appears once.
-    """
     query_embedding = embed_text(query_text)
-    client = client or get_qdrant()
+    cl = client or get_qdrant()
 
     conditions = [FieldCondition(key="status", match=MatchValue(value="processed"))]
     if min_years is not None:
@@ -161,7 +147,7 @@ async def search_by_chunks(
             FieldCondition(key="total_years_experience", range=Range(gte=min_years))
         )
 
-    result = await client.query_points_groups(
+    result = cl.query_points_groups(
         collection_name=config.qdrant_collection,
         query=query_embedding,
         group_by="candidate_id",
@@ -174,25 +160,16 @@ async def search_by_chunks(
     return [_hit_to_dict(group.hits[0]) for group in result.groups if group.hits]
 
 
-async def search_with_skills_by_chunks(
+def search_with_skills_by_chunks(
     query_text: str,
     required_skills: list[str] | None = None,
     min_years: float | None = None,
     location: str | None = None,
     top_k: int = 10,
-    session=None,  # unused — kept so callers don't need updating
-    client: AsyncQdrantClient | None = None,
+    client: QdrantClient | None = None,
 ) -> list[dict]:
-    """
-    Vector search with native Qdrant payload filtering.
-    Filters are applied during HNSW traversal — no Python post-filtering,
-    no over-fetching, no missed candidates.
-
-    Skills use AND logic: candidate must have ALL required skills.
-    Skills are stored lowercase; query skills are lowercased before matching.
-    """
     query_embedding = embed_text(query_text)
-    client = client or get_qdrant()
+    cl = client or get_qdrant()
 
     conditions = [FieldCondition(key="status", match=MatchValue(value="processed"))]
 
@@ -212,7 +189,7 @@ async def search_with_skills_by_chunks(
             FieldCondition(key="location", match=MatchText(text=location))
         )
 
-    result = await client.query_points_groups(
+    result = cl.query_points_groups(
         collection_name=config.qdrant_collection,
         query=query_embedding,
         group_by="candidate_id",
@@ -225,7 +202,7 @@ async def search_with_skills_by_chunks(
     return [_hit_to_dict(group.hits[0]) for group in result.groups if group.hits]
 
 
-async def get_chunk_count() -> int:
+def get_chunk_count() -> int:
     client = get_qdrant()
-    result = await client.count(collection_name=config.qdrant_collection, exact=False)
+    result = client.count(collection_name=config.qdrant_collection, exact=False)
     return result.count

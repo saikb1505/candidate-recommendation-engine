@@ -1,11 +1,10 @@
-import asyncio
 import tempfile
 import uuid
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
 from workers.celery_app import celery_app
@@ -19,23 +18,12 @@ from config.settings import config
 
 
 def _make_session():
-    # NullPool prevents connection state leaking across asyncio.run() calls.
-    engine = create_async_engine(config.database_url, poolclass=NullPool)
-    return async_sessionmaker(engine, expire_on_commit=False), engine
+    engine = create_engine(config.sync_database_url, poolclass=NullPool)
+    return sessionmaker(engine, expire_on_commit=False), engine
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def ingest_resume(self, s3_key: str, candidate_id: str):
-    try:
-        asyncio.run(_ingest_resume(s3_key, candidate_id))
-    except IntegrityError:
-        # Duplicate email — permanent failure, no point retrying.
-        pass
-    except Exception as exc:
-        raise self.retry(exc=exc)
-
-
-async def _ingest_resume(s3_key: str, candidate_id: str):
     Session, engine = _make_session()
 
     suffix = Path(s3_key).suffix.lower()
@@ -54,13 +42,12 @@ async def _ingest_resume(s3_key: str, candidate_id: str):
             tmp.write(file_bytes)
             tmp_path = tmp.name
 
-        resume, error = await process_single(tmp_path, file_type)
+        resume, error = process_single(tmp_path, file_type)
 
-        async with Session() as session:
-            result = await session.execute(
+        with Session() as session:
+            candidate = session.scalar(
                 select(Candidate).where(Candidate.id == uuid.UUID(candidate_id))
             )
-            candidate = result.scalar_one_or_none()
             if not candidate:
                 print(f"[ingest_resume] candidate {candidate_id} not found in DB")
                 return
@@ -73,18 +60,17 @@ async def _ingest_resume(s3_key: str, candidate_id: str):
                 candidate.status = "failed"
             else:
                 if resume.contact.email:
-                    dup_result = await session.execute(
+                    existing = session.scalar(
                         select(Candidate).where(
                             Candidate.email == resume.contact.email,
                             Candidate.id != uuid.UUID(candidate_id),
                         )
                     )
-                    existing = dup_result.scalar_one_or_none()
                     if existing:
                         print(f"[ingest_resume] duplicate email {resume.contact.email!r}, "
                               f"deleting {candidate_id} (duplicate of {existing.id})")
-                        await session.delete(candidate)
-                        await session.commit()
+                        session.delete(candidate)
+                        session.commit()
                         delete_file(s3_key)
                         return
 
@@ -100,7 +86,7 @@ async def _ingest_resume(s3_key: str, candidate_id: str):
                 candidate.status = "processed"
 
                 for company_name in resume.companies:
-                    existing_company = await session.scalar(
+                    existing_company = session.scalar(
                         select(Company).where(Company.name == company_name)
                     )
                     if not existing_company:
@@ -110,14 +96,13 @@ async def _ingest_resume(s3_key: str, candidate_id: str):
                 chunk_embeddings = embed_chunks_batch(chunks) if chunks else []
 
             try:
-                await session.commit()
+                session.commit()
                 print(f"[ingest_resume] committed candidate {candidate_id} status={candidate.status}")
 
-                # Fresh Qdrant client per task — each asyncio.run() has its own event loop.
                 if not error and chunks and chunk_embeddings:
                     qdrant = make_qdrant_client()
                     try:
-                        await upsert_chunks(
+                        upsert_chunks(
                             candidate_id=candidate_id,
                             chunks=chunks,
                             embeddings=chunk_embeddings,
@@ -134,67 +119,60 @@ async def _ingest_resume(s3_key: str, candidate_id: str):
                         )
                         print(f"[ingest_resume] upserted {len(chunks)} chunks to Qdrant for {candidate_id}")
                     finally:
-                        await qdrant.close()
+                        qdrant.close()
             except IntegrityError:
-                # Race: another worker committed the same email first — delete this one.
-                await session.rollback()
-                async with Session() as session2:
-                    result2 = await session2.execute(
+                session.rollback()
+                with Session() as session2:
+                    candidate2 = session2.scalar(
                         select(Candidate).where(Candidate.id == uuid.UUID(candidate_id))
                     )
-                    candidate2 = result2.scalar_one_or_none()
                     if candidate2:
-                        await session2.delete(candidate2)
-                        await session2.commit()
+                        session2.delete(candidate2)
+                        session2.commit()
                 delete_file(s3_key)
                 print(f"[ingest_resume] race-condition duplicate for {candidate_id}, deleted")
+
+    except IntegrityError:
+        pass
+    except Exception as exc:
+        raise self.retry(exc=exc)
     finally:
         if tmp_path:
             Path(tmp_path).unlink(missing_ok=True)
-        await engine.dispose()
+        engine.dispose()
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def process_job_post(self, job_post_id: str):
-    try:
-        asyncio.run(_process_job_post(job_post_id))
-    except Exception as exc:
-        raise self.retry(exc=exc)
-
-
-async def _process_job_post(job_post_id: str):
     Session, engine = _make_session()
     qdrant = make_qdrant_client()
 
     try:
-        async with Session() as session:
-            result = await session.execute(
+        with Session() as session:
+            job_post = session.scalar(
                 select(JobPost).where(JobPost.id == uuid.UUID(job_post_id))
             )
-            job_post = result.scalar_one_or_none()
             if not job_post:
                 print(f"[process_job_post] job_post {job_post_id} not found in DB")
                 return
 
-            matches = await smart_match(job_description=job_post.description, top_k=20, client=qdrant)
+            matches = smart_match(job_description=job_post.description, top_k=20, client=qdrant)
 
             for match in matches:
                 score = min(100, round(match.similarity_score * 100))
 
-                candidate_result = await session.execute(
+                candidate = session.scalar(
                     select(Candidate).where(Candidate.id == uuid.UUID(match.resume_id))
                 )
-                candidate = candidate_result.scalar_one_or_none()
                 if not candidate:
                     continue
 
-                existing_match_result = await session.execute(
+                existing_match = session.scalar(
                     select(CandidateJobMatch).where(
                         CandidateJobMatch.candidate_id == candidate.id,
                         CandidateJobMatch.job_post_id == job_post.id,
                     )
                 )
-                existing_match = existing_match_result.scalar_one_or_none()
                 if existing_match:
                     existing_match.match_score = score
                     existing_match.match_explanation = match.match_explanation
@@ -209,8 +187,11 @@ async def _process_job_post(job_post_id: str):
                     ))
 
             job_post.status = "processed"
-            await session.commit()
+            session.commit()
             print(f"[process_job_post] committed {len(matches)} matches for job {job_post_id}")
+
+    except Exception as exc:
+        raise self.retry(exc=exc)
     finally:
-        await qdrant.close()
-        await engine.dispose()
+        qdrant.close()
+        engine.dispose()
