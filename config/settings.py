@@ -19,6 +19,10 @@ class AppConfig(BaseSettings):
         ".jpg", ".jpeg", ".png", ".webp",
     }
 
+    # --- API keys ---
+    groq_api_key: str = ""
+    openai_api_key: str = ""
+
     # --- LLM settings ---
     groq_model: str = "llama-3.3-70b-versatile"
     openai_vision_model: str = "gpt-4o-mini"

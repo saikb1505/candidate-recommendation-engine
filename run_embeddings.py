@@ -57,7 +57,7 @@ async def backfill_chunks():
 
                 chunk_embeddings = embed_chunks_batch(chunks)
 
-                await upsert_chunks(
+                upsert_chunks(
                     candidate_id=str(candidate.id),
                     chunks=chunks,
                     embeddings=chunk_embeddings,
@@ -87,7 +87,7 @@ async def run_sample_searches():
 
     for query in queries:
         print(f'  Query: "{query}"')
-        results = await search_by_chunks(query, top_k=3)
+        results = search_by_chunks(query, top_k=3)
 
         if results:
             for rank, result in enumerate(results, 1):
@@ -108,7 +108,7 @@ async def main():
     print()
 
     print("[Step 1] Ensuring Qdrant collection exists...")
-    await setup_collection()
+    setup_collection()
     print("  Collection ready.")
 
     print()
@@ -119,12 +119,12 @@ async def main():
     else:
         print("  Nothing to backfill.")
 
-    count = await get_chunk_count()
+    count = get_chunk_count()
     print(f"  Total chunk vectors in Qdrant: {count}")
 
     if count == 0:
         print("\n  No vectors found — ingest some resumes first.")
-        await get_qdrant().close()
+        get_qdrant().close()
         return
 
     print()
@@ -132,7 +132,7 @@ async def main():
     print()
     await run_sample_searches()
 
-    await get_qdrant().close()
+    get_qdrant().close()
 
     print("=" * 50)
     print("  Done.")

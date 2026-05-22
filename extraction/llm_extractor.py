@@ -82,7 +82,7 @@ def _extract_with_groq(file_path: str) -> dict:
         return {"_error": f"docling conversion failed: {e}"}
 
     try:
-        client = Groq()
+        client = Groq(api_key=config.groq_api_key or None)
         response = client.chat.completions.create(
             model=config.groq_model,
             messages=[
@@ -118,7 +118,7 @@ def _extract_with_vision(file_path: str, file_type: str) -> dict:
     })
 
     try:
-        client = OpenAI()
+        client = OpenAI(api_key=config.openai_api_key or None)
         response = client.chat.completions.create(
             model=config.openai_vision_model,
             messages=[
@@ -146,7 +146,6 @@ def _groq_result_is_incomplete(result: dict) -> bool:
 def extract_resume_with_retry(file_path: str, file_type: str) -> dict:
     """Try Groq first; fall back to GPT-4o-mini vision if Groq fails or returns incomplete data."""
     result = _extract_with_groq(file_path)
-
     if "_error" not in result and not _groq_result_is_incomplete(result):
         return result
 
