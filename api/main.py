@@ -1,7 +1,9 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import io
 import uuid
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -60,6 +62,81 @@ async def upload_resume(
     task = ingest_resume.delay(s3_key, candidate_id)  # type: ignore[attr-defined]
 
     return {"candidate_id": candidate_id, "task_id": task.id, "status": "processing"}
+
+
+MAX_ZIP_BYTES = 500 * 1024 * 1024  # 500 MB total ZIP limit
+
+
+@app.post("/resumes/upload-zip", status_code=202)
+async def upload_zip(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    # Must be a ZIP file
+    filename = file.filename or ""
+    if not filename.lower().endswith(".zip"):
+        raise HTTPException(400, "Only .zip files are accepted")
+
+    content = await file.read(MAX_ZIP_BYTES + 1)
+    if len(content) > MAX_ZIP_BYTES:
+        raise HTTPException(413, f"ZIP exceeds {MAX_ZIP_BYTES // (1024 * 1024)} MB limit")
+
+    # Validate ZIP integrity
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(content))
+    except zipfile.BadZipFile:
+        raise HTTPException(400, "Invalid or corrupted ZIP file")
+
+    results = []
+    accepted = 0
+    rejected = 0
+
+    for entry in zf.infolist():
+        name = Path(entry.filename).name
+
+        # Skip directories and anything that isn't a resume file
+        if entry.is_dir() or not name:
+            continue
+
+        suffix = Path(name).suffix.lower()
+        if suffix not in {".pdf", ".docx", ".doc"}:
+            continue
+
+        # ZIP bomb guard: check declared uncompressed size before reading
+        if entry.file_size > config.max_upload_bytes:
+            results.append({"filename": name, "error": f"File exceeds {config.max_upload_bytes // (1024 * 1024)} MB limit"})
+            rejected += 1
+            continue
+
+        file_bytes = zf.read(entry.filename)
+
+        # Double-check actual size after decompression
+        if len(file_bytes) > config.max_upload_bytes:
+            results.append({"filename": name, "error": f"File exceeds {config.max_upload_bytes // (1024 * 1024)} MB limit"})
+            rejected += 1
+            continue
+
+        candidate_id = uuid.uuid4()
+        s3_key = f"{candidate_id}{suffix}"
+
+        upload_file(file_bytes, s3_key, "application/octet-stream")
+        db.add(Candidate(id=candidate_id, s3_key=s3_key, status="pending"))
+        task = ingest_resume.delay(s3_key, str(candidate_id))  # type: ignore[attr-defined]
+
+        results.append({
+            "filename": name,
+            "candidate_id": str(candidate_id),
+            "task_id": task.id,
+            "status": "processing",
+        })
+        accepted += 1
+
+    if accepted == 0 and rejected == 0:
+        raise HTTPException(400, "ZIP contains no supported resume files")
+
+    await db.commit()
+
+    return {"accepted": accepted, "rejected": rejected, "results": results}
 
 
 @app.get("/candidates/{candidate_id}")
