@@ -24,7 +24,7 @@ class AppConfig(BaseSettings):
     openai_api_key: str = ""
 
     # --- LLM settings ---
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     openai_vision_model: str = "gpt-4o-mini"
     llm_model: str = "claude-haiku-4-5-20251001"
     max_tokens: int = 4096

@@ -8,13 +8,15 @@ Images are only produced if Groq fails or returns incomplete contact info.
 """
 
 import json
+import time
 from datetime import date
 
-from groq import Groq
-from openai import OpenAI
+from groq import Groq, RateLimitError as GroqRateLimitError
 
 from config.settings import config
 from ingestion.converter import convert_to_images
+
+_groq_client = Groq(api_key=config.groq_api_key or None)
 
 
 def _build_system_prompt() -> str:
@@ -82,8 +84,7 @@ def _extract_with_groq(file_path: str) -> dict:
         return {"_error": f"docling conversion failed: {e}"}
 
     try:
-        client = Groq(api_key=config.groq_api_key or None)
-        response = client.chat.completions.create(
+        response = _groq_client.chat.completions.create(
             model=config.groq_model,
             messages=[
                 {"role": "system", "content": _build_system_prompt()},
@@ -96,6 +97,8 @@ def _extract_with_groq(file_path: str) -> dict:
         if "_error" not in result:
             result["_extraction_method"] = "groq"
         return result
+    except GroqRateLimitError:
+        raise
     except Exception as e:
         return {"_error": f"Groq API failed: {e}"}
 
@@ -118,9 +121,8 @@ def _extract_with_vision(file_path: str, file_type: str) -> dict:
     })
 
     try:
-        client = OpenAI(api_key=config.openai_api_key or None)
-        response = client.chat.completions.create(
-            model=config.openai_vision_model,
+        response = _groq_client.chat.completions.create(
+            model=config.groq_model,
             messages=[
                 {"role": "system", "content": _build_system_prompt()},
                 {"role": "user", "content": content},
@@ -130,24 +132,37 @@ def _extract_with_vision(file_path: str, file_type: str) -> dict:
         raw_text = response.choices[0].message.content
         result = _parse_json_response(raw_text)
         if "_error" not in result:
-            result["_extraction_method"] = "gpt4o-mini-vision"
+            result["_extraction_method"] = "groq-scout-vision"
         return result
+    except GroqRateLimitError:
+        raise
     except Exception as e:
-        return {"_error": f"OpenAI API failed: {e}"}
+        return {"_error": f"Groq vision API failed: {e}"}
 
 
 def _groq_result_is_incomplete(result: dict) -> bool:
     contact = result.get("contact", {})
     missing_contact = not (contact.get("name") and contact.get("email"))
     missing_experience = not result.get("experience")
-    return missing_contact or missing_experience
+    missing_skills = not result.get("skills")
+    missing_years = result.get("total_years_experience") in (None, 0.0, "")
+    missing_companies = not result.get("companies")
+    return missing_contact or missing_experience or missing_skills or missing_years or missing_companies
 
 
 def extract_resume_with_retry(file_path: str, file_type: str) -> dict:
-    """Try Groq first; fall back to GPT-4o-mini vision if Groq fails or returns incomplete data."""
-    result = _extract_with_groq(file_path)
-    if "_error" not in result and not _groq_result_is_incomplete(result):
-        return result
+    """Retry Groq Scout (text) up to max_retries on rate limits; fall back to vision on failure or incomplete data."""
+    for attempt in range(config.max_retries):
+        try:
+            result = _extract_with_groq(file_path)
+            if "_error" not in result and not _groq_result_is_incomplete(result):
+                return result
+            break  # incomplete or parse error — fall through to vision
+        except GroqRateLimitError:
+            if attempt < config.max_retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                raise
 
     return _extract_with_vision(file_path, file_type)
 
