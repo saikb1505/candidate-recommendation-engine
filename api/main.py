@@ -87,10 +87,8 @@ async def upload_zip(
     for entry in zf.infolist():
         name = Path(entry.filename).name
 
-        # Skip directories, macOS resource forks, and hidden files
-        if entry.is_dir() or not name:
-            continue
-        if name.startswith(".") or entry.filename.startswith("__MACOSX/"):
+        # Skip directories and hidden/system files (e.g. macOS ._* resource forks)
+        if entry.is_dir() or not name or name.startswith("."):
             continue
 
         suffix = Path(name).suffix.lower()
