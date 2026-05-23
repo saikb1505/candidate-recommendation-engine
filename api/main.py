@@ -39,7 +39,6 @@ app = FastAPI(title="Resume Matcher API", lifespan=lifespan)
 @app.post("/resumes/upload", status_code=202)
 async def upload_resume(
     file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
 ):
     filename = file.filename or ""
     suffix = Path(filename).suffix.lower()
@@ -55,12 +54,7 @@ async def upload_resume(
 
     upload_file(content, s3_key, file.content_type or "application/octet-stream")
 
-    candidate = Candidate(id=uuid.UUID(candidate_id), s3_key=s3_key, status="pending")
-    db.add(candidate)
-    await db.commit()
-
-    task = ingest_resume.delay(s3_key, candidate_id)  # type: ignore[attr-defined]
-
+    task = ingest_resume.delay(s3_key, candidate_id)
     return {"candidate_id": candidate_id, "task_id": task.id, "status": "processing"}
 
 
@@ -70,7 +64,6 @@ MAX_ZIP_BYTES = 500 * 1024 * 1024  # 500 MB total ZIP limit
 @app.post("/resumes/upload-zip", status_code=202)
 async def upload_zip(
     file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
 ):
     # Must be a ZIP file
     filename = file.filename or ""
@@ -94,8 +87,10 @@ async def upload_zip(
     for entry in zf.infolist():
         name = Path(entry.filename).name
 
-        # Skip directories and anything that isn't a resume file
+        # Skip directories, macOS resource forks, and hidden files
         if entry.is_dir() or not name:
+            continue
+        if name.startswith(".") or entry.filename.startswith("__MACOSX/"):
             continue
 
         suffix = Path(name).suffix.lower()
@@ -120,7 +115,6 @@ async def upload_zip(
         s3_key = f"{candidate_id}{suffix}"
 
         upload_file(file_bytes, s3_key, "application/octet-stream")
-        db.add(Candidate(id=candidate_id, s3_key=s3_key, status="pending"))
         task = ingest_resume.delay(s3_key, str(candidate_id))  # type: ignore[attr-defined]
 
         results.append({
@@ -133,8 +127,6 @@ async def upload_zip(
 
     if accepted == 0 and rejected == 0:
         raise HTTPException(400, "ZIP contains no supported resume files")
-
-    await db.commit()
 
     return {"accepted": accepted, "rejected": rejected, "results": results}
 

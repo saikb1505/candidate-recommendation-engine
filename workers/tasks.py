@@ -45,61 +45,54 @@ def ingest_resume(self, s3_key: str, candidate_id: str):
         resume, error = process_single(tmp_path, file_type)
 
         with Session() as session:
-            candidate = session.scalar(
-                select(Candidate).where(Candidate.id == uuid.UUID(candidate_id))
-            )
-            if not candidate:
-                print(f"[ingest_resume] candidate {candidate_id} not found in DB")
-                return
-
-            chunks = []
-            chunk_embeddings = []
-
             if error:
                 print(f"[ingest_resume] extraction failed: {error}")
-                candidate.status = "failed"
-            else:
-                if resume.contact.email:
-                    existing = session.scalar(
-                        select(Candidate).where(
-                            Candidate.email == resume.contact.email,
-                            Candidate.id != uuid.UUID(candidate_id),
-                        )
-                    )
-                    if existing:
-                        print(f"[ingest_resume] duplicate email {resume.contact.email!r}, "
-                              f"deleting {candidate_id} (duplicate of {existing.id})")
-                        session.delete(candidate)
-                        session.commit()
-                        delete_file(s3_key)
-                        return
+                session.add(Candidate(id=uuid.UUID(candidate_id), s3_key=s3_key, status="failed"))
+                session.commit()
+                return
 
-                candidate.name = resume.contact.name
-                candidate.email = resume.contact.email
-                candidate.phone = resume.contact.phone
-                candidate.location = resume.contact.location
-                candidate.skills = resume.skills
-                candidate.total_years_experience = resume.total_years_experience
-                candidate.highest_education = resume.highest_education
-                candidate.summary = resume.summary
-                candidate.raw_data = resume.model_dump()
-                candidate.status = "processed"
+            assert resume is not None
+            if resume.contact.email:
+                existing = session.scalar(
+                    select(Candidate).where(Candidate.email == resume.contact.email)
+                )
+                if existing:
+                    print(f"[ingest_resume] duplicate email {resume.contact.email!r}, "
+                          f"skipping {candidate_id} (duplicate of {existing.id})")
+                    delete_file(s3_key)
+                    return
 
-                for company_name in resume.companies:
-                    existing_company = session.scalar(
-                        select(Company).where(Company.name == company_name)
-                    )
-                    if not existing_company:
-                        session.add(Company(name=company_name, source="Resume"))
+            candidate = Candidate(
+                id=uuid.UUID(candidate_id),
+                s3_key=s3_key,
+                name=resume.contact.name,
+                email=resume.contact.email,
+                phone=resume.contact.phone,
+                location=resume.contact.location,
+                skills=resume.skills,
+                total_years_experience=resume.total_years_experience,
+                highest_education=resume.highest_education,
+                summary=resume.summary,
+                raw_data=resume.model_dump(),
+                status="processed",
+            )
+            session.add(candidate)
 
-                chunks = resume.to_chunks()
-                chunk_embeddings = embed_chunks_batch(chunks) if chunks else []
+            for company_name in resume.companies:
+                existing_company = session.scalar(
+                    select(Company).where(Company.name == company_name)
+                )
+                if not existing_company:
+                    session.add(Company(name=company_name, source="Resume"))
+
+            chunks = resume.to_chunks()
+            chunk_embeddings = embed_chunks_batch(chunks) if chunks else []
 
             try:
                 session.commit()
-                print(f"[ingest_resume] committed candidate {candidate_id} status={candidate.status}")
+                print(f"[ingest_resume] committed candidate {candidate_id} status=processed")
 
-                if not error and chunks and chunk_embeddings:
+                if chunks and chunk_embeddings:
                     qdrant = make_qdrant_client()
                     try:
                         upsert_chunks(
@@ -122,13 +115,6 @@ def ingest_resume(self, s3_key: str, candidate_id: str):
                         qdrant.close()
             except IntegrityError:
                 session.rollback()
-                with Session() as session2:
-                    candidate2 = session2.scalar(
-                        select(Candidate).where(Candidate.id == uuid.UUID(candidate_id))
-                    )
-                    if candidate2:
-                        session2.delete(candidate2)
-                        session2.commit()
                 delete_file(s3_key)
                 print(f"[ingest_resume] race-condition duplicate for {candidate_id}, deleted")
 
