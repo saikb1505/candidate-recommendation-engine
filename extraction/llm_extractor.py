@@ -13,6 +13,7 @@ from datetime import date
 
 from groq import Groq, RateLimitError as GroqRateLimitError
 
+from config.prompts import prompts
 from config.settings import config
 from ingestion.converter import convert_to_images
 
@@ -21,53 +22,7 @@ _groq_client = Groq(api_key=config.groq_api_key or None)
 
 def _build_system_prompt() -> str:
     today = date.today().strftime("%b %Y")
-    return f"""You are a resume data extractor. Extract structured information into JSON format.
-
-Today's date is {today}. Use this to calculate durations when a role says "Present" or "Current".
-
-RULES:
-1. Return ONLY valid JSON. No markdown, no explanation, no ```json blocks.
-2. Extract exactly these fields — no more, no less.
-3. If a field is not found, use empty string "" or empty list [].
-4. For total_years_experience, sum the years across all experience entries. Treat "Present"/"Current" as {today}.
-5. Skills should be individual items: ["Python", "AWS"] not ["Python and AWS"].
-6. For experience descriptions, capture what the person DID, not their job title again.
-7. Extract all company names: ["Company 1", "Company 2"] from experience.
-
-REQUIRED JSON STRUCTURE:
-{{
-    "contact": {{
-        "name": "Full Name",
-        "email": "email@example.com",
-        "phone": "+91-1234567890",
-        "location": "City, State",
-        "linkedin": "linkedin.com/in/username"
-    }},
-    "title": "Software Engineer",
-    "summary": "Professional summary or objective if present",
-    "skills": ["Skill1", "Skill2", "Skill3"],
-    "total_years_experience": 5.0,
-    "highest_education": "B.Tech / M.Tech / PhD / MBA etc",
-    "experience": [
-        {{
-            "title": "Job Title",
-            "company": "Company Name",
-            "duration": "Jan 2020 - Mar 2023",
-            "years": 3.2,
-            "description": "What they accomplished in this role"
-        }}
-    ],
-    "education": [
-        {{
-            "degree": "Degree Name and Field",
-            "institution": "University Name",
-            "graduation_year": "2020"
-        }}
-    ],
-    "companies": ["Company 1", "Company 2"]
-}}
-
-Remember: ONLY output the JSON object. Nothing else."""
+    return prompts["extraction"]["system"].format(today=today)
 
 
 def _to_markdown(file_path: str) -> str:
@@ -88,7 +43,7 @@ def _extract_with_groq(file_path: str) -> dict:
             model=config.groq_model,
             messages=[
                 {"role": "system", "content": _build_system_prompt()},
-                {"role": "user", "content": f"Extract resume data from this markdown:\n\n{markdown}"},
+                {"role": "user", "content": prompts["extraction"]["user_text"].format(markdown=markdown)},
             ],
             max_tokens=config.max_tokens,
         )
@@ -117,7 +72,7 @@ def _extract_with_vision(file_path: str, file_type: str) -> dict:
     ]
     content.append({
         "type": "text",
-        "text": "Extract all information from this resume into the JSON structure defined in your instructions.",
+        "text": prompts["extraction"]["user_vision"],
     })
 
     try:

@@ -1,5 +1,6 @@
 pydantic
 pydantic-settings
+pyyaml
 python-magic
 pdf2image
 Pillow

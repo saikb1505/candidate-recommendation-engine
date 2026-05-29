@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from anthropic import Anthropic
 from qdrant_client import QdrantClient
 
+from config.prompts import prompts
 from config.settings import config
 from embeddings.vector_store import search_by_chunks, search_with_skills_by_chunks
 
@@ -101,25 +102,7 @@ def smart_match(
     return ranked
 
 
-JD_PARSE_PROMPT = """You are a job description parser. Extract the key requirements
-from the job description below.
-
-Return ONLY valid JSON with this structure:
-{
-    "skills": ["skill1", "skill2"],
-    "min_years": 5,
-    "location": "city name or null",
-    "role_summary": "one sentence describing the ideal candidate"
-}
-
-RULES:
-1. skills: list the most important technical skills (max 5).
-   Use common names: "Python" not "python programming language".
-2. min_years: minimum years of experience mentioned. Use 0 if not specified.
-3. location: city/region if mentioned, null if remote or not specified.
-4. role_summary: one sentence capturing what this role needs.
-
-Return ONLY the JSON. No markdown, no explanation."""
+JD_PARSE_PROMPT = prompts["recommendation"]["jd_parse_system"]
 
 
 def _parse_job_description(jd_text: str) -> dict:
@@ -156,25 +139,7 @@ def _parse_job_description(jd_text: str) -> dict:
         return {}
 
 
-RERANK_PROMPT = """You are a recruitment matching expert. Given a job description
-and a list of candidates, rank them by how well they match the role.
-
-For each candidate, provide:
-1. A match score from 1-10 (10 = perfect match)
-2. A brief explanation of why they match or don't (max 2 sentences)
-
-Return ONLY valid JSON as a list:
-[
-    {
-        "resume_id": "candidate_id_here",
-        "match_score": 8,
-        "explanation": "Strong Python background with 5 years of API development.
-                        Lacks AWS experience mentioned in JD."
-    }
-]
-
-Sort by match_score descending (best match first).
-Return ONLY the JSON array. No markdown, no explanation."""
+RERANK_PROMPT = prompts["recommendation"]["rerank_system"]
 
 
 def _rerank_with_llm(
@@ -194,13 +159,11 @@ def _rerank_with_llm(
             "resume": c.resume_text,
         })
 
-    prompt = f"""JOB DESCRIPTION:
-{job_description}
-
-CANDIDATES:
-{json.dumps(candidate_info, indent=2)}
-
-Rank these candidates by match quality. Return top {top_k}."""
+    prompt = prompts["recommendation"]["rerank_user"].format(
+        job_description=job_description,
+        candidates_json=json.dumps(candidate_info, indent=2),
+        top_k=top_k,
+    )
 
     try:
         response = client.messages.create(
