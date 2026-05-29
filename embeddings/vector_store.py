@@ -39,19 +39,19 @@ def make_qdrant_client() -> QdrantClient:
 
 
 def setup_collection() -> None:
-    """Create the collection and payload indexes if they don't exist yet."""
+    """Create the collection and ensure all payload indexes exist."""
     client = get_qdrant()
 
-    if client.collection_exists(config.qdrant_collection):
-        return
-
-    client.create_collection(
-        collection_name=config.qdrant_collection,
-        vectors_config=VectorParams(size=768, distance=Distance.COSINE),
-    )
+    if not client.collection_exists(config.qdrant_collection):
+        client.create_collection(
+            collection_name=config.qdrant_collection,
+            vectors_config=VectorParams(size=768, distance=Distance.COSINE),
+        )
+        print(f"  Qdrant collection '{config.qdrant_collection}' created.")
 
     indexes = {
         "candidate_id":           PayloadSchemaType.KEYWORD,
+        "email":                  PayloadSchemaType.KEYWORD,
         "skills":                 PayloadSchemaType.KEYWORD,
         "status":                 PayloadSchemaType.KEYWORD,
         "location":               PayloadSchemaType.KEYWORD,
@@ -60,7 +60,7 @@ def setup_collection() -> None:
     for field, schema in indexes.items():
         client.create_payload_index(config.qdrant_collection, field, schema)
 
-    print(f"  Qdrant collection '{config.qdrant_collection}' created with indexes.")
+    print(f"  Qdrant indexes applied to '{config.qdrant_collection}'.")
 
 
 def _chunk_point_id(candidate_id: str, chunk_type: str, chunk_index: int) -> str:
@@ -113,6 +113,27 @@ def delete_candidate_chunks(
             must=[FieldCondition(key="candidate_id", match=MatchValue(value=candidate_id))]
         ),
     )
+
+
+def find_candidate_id_by_email(
+    email: str,
+    client: QdrantClient | None = None,
+) -> str | None:
+    """Return the candidate_id of the first chunk matching this email, or None."""
+    if not email:
+        return None
+    cl = client or get_qdrant()
+    points, _ = cl.scroll(
+        collection_name=config.qdrant_collection,
+        scroll_filter=Filter(
+            must=[FieldCondition(key="email", match=MatchValue(value=email))]
+        ),
+        limit=1,
+        with_payload=["candidate_id"],
+    )
+    if points:
+        return (points[0].payload or {}).get("candidate_id")
+    return None
 
 
 def _hit_to_dict(hit) -> dict:

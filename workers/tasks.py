@@ -12,7 +12,7 @@ from db.models import Candidate, Company, JobPost, CandidateJobMatch
 from storage.s3 import download_file, delete_file
 from ingestion.pipeline import process_single
 from embeddings.embedder import embed_chunks_batch
-from embeddings.vector_store import make_qdrant_client, upsert_chunks
+from embeddings.vector_store import make_qdrant_client, upsert_chunks, find_candidate_id_by_email, delete_candidate_chunks
 from recommendation.ranker import smart_match
 from config.settings import config
 
@@ -95,6 +95,11 @@ def ingest_resume(self, s3_key: str, candidate_id: str):
                 if chunks and chunk_embeddings:
                     qdrant = make_qdrant_client()
                     try:
+                        existing_qdrant_id = find_candidate_id_by_email(candidate.email or "", qdrant)
+                        if existing_qdrant_id and existing_qdrant_id != candidate_id:
+                            print(f"[ingest_resume] removing orphaned Qdrant chunks for email "
+                                  f"{candidate.email!r} (old id={existing_qdrant_id})")
+                            delete_candidate_chunks(existing_qdrant_id, qdrant)
                         upsert_chunks(
                             candidate_id=candidate_id,
                             chunks=chunks,
