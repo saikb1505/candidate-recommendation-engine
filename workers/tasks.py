@@ -52,31 +52,44 @@ def ingest_resume(self, s3_key: str, candidate_id: str):
                 return
 
             assert resume is not None
+
+            existing = None
             if resume.contact.email:
                 existing = session.scalar(
                     select(Candidate).where(Candidate.email == resume.contact.email)
                 )
-                if existing:
-                    print(f"[ingest_resume] duplicate email {resume.contact.email!r}, "
-                          f"skipping {candidate_id} (duplicate of {existing.id})")
-                    delete_file(s3_key)
-                    return
 
-            candidate = Candidate(
-                id=uuid.UUID(candidate_id),
-                s3_key=s3_key,
-                name=resume.contact.name,
-                email=resume.contact.email,
-                phone=resume.contact.phone,
-                location=resume.contact.location,
-                skills=resume.skills,
-                total_years_experience=resume.total_years_experience,
-                highest_education=resume.highest_education,
-                summary=resume.summary,
-                raw_data=resume.model_dump(),
-                status="processed",
-            )
-            session.add(candidate)
+            if existing:
+                print(f"[ingest_resume] refreshing existing candidate {existing.id} "
+                      f"for email {resume.contact.email!r}")
+                existing.name = resume.contact.name
+                existing.phone = resume.contact.phone
+                existing.location = resume.contact.location
+                existing.skills = resume.skills
+                existing.total_years_experience = resume.total_years_experience
+                existing.highest_education = resume.highest_education
+                existing.summary = resume.summary
+                existing.raw_data = resume.model_dump()
+                existing.status = "processed"
+                candidate = existing
+                candidate_id = str(existing.id)
+                delete_file(s3_key)
+            else:
+                candidate = Candidate(
+                    id=uuid.UUID(candidate_id),
+                    s3_key=s3_key,
+                    name=resume.contact.name,
+                    email=resume.contact.email,
+                    phone=resume.contact.phone,
+                    location=resume.contact.location,
+                    skills=resume.skills,
+                    total_years_experience=resume.total_years_experience,
+                    highest_education=resume.highest_education,
+                    summary=resume.summary,
+                    raw_data=resume.model_dump(),
+                    status="processed",
+                )
+                session.add(candidate)
 
             for company_name in resume.companies:
                 existing_company = session.scalar(
